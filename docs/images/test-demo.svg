@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="430" viewBox="0 0 1100 430" role="img" aria-labelledby="title desc">
+  <title id="title">Travel Planner Agent offline test demo</title>
+  <desc id="desc">A terminal showing twelve tests passing and an import-safety check.</desc>
+  <rect width="1100" height="430" rx="16" fill="#111827"/>
+  <rect width="1100" height="48" rx="16" fill="#1f2937"/>
+  <circle cx="28" cy="24" r="7" fill="#ef4444"/>
+  <circle cx="52" cy="24" r="7" fill="#f59e0b"/>
+  <circle cx="76" cy="24" r="7" fill="#10b981"/>
+  <text x="550" y="30" text-anchor="middle" fill="#d1d5db" font-family="Consolas, monospace" font-size="15">PowerShell — D:\project_of_python</text>
+  <g fill="#e5e7eb" font-family="Consolas, 'Microsoft YaHei', monospace" font-size="18">
+    <text x="30" y="92"><tspan fill="#34d399">PS&gt;</tspan> uv run --offline pytest</text>
+    <text x="30" y="132">............</text>
+    <text x="30" y="172" fill="#6ee7b7">12 passed in 2.61s</text>
+    <text x="30" y="228"><tspan fill="#34d399">PS&gt;</tspan> python -c "import weather_window"</text>
+    <text x="30" y="268" fill="#93c5fd"># no model call, no HTTP request, no output</text>
+    <text x="30" y="324"><tspan fill="#34d399">PS&gt;</tspan> python -m py_compile weather_tool.py travel_planner_tool.py</text>
+    <text x="30" y="364" fill="#6ee7b7"># exit code 0</text>
+  </g>
+</svg>

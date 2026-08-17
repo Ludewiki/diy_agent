@@ -1,0 +1,22 @@
+name: Feature request
+description: 提议新的数据源、Tool 或 Agent 运行时能力
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: use_case
+    attributes:
+      label: 用户场景与验收标准
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: 建议设计与备选方案
+  - type: checkboxes
+    id: risks
+    attributes:
+      label: 外部依赖检查
+      options:
+        - label: 已确认数据源许可、调用配额和服务条款
+        - label: 已说明隐私、费用和失败降级策略

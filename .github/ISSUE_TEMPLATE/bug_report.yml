@@ -1,0 +1,32 @@
+name: Bug report
+description: 报告可复现的工具、算法或 Agent 工作流问题
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 最小复现步骤
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+  - type: input
+    id: error_code
+    attributes:
+      label: error_code / request_id
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: Python、OS、依赖版本；请勿粘贴 API Key 或 .env
