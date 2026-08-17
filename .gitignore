@@ -1,0 +1,30 @@
+# Secrets: never commit local credentials.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+.uv-cache/
+
+# Local runtime state
+*.db
+*.sqlite
+*.sqlite3
+resources/checkpoint.db
+logs/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
