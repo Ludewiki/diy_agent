@@ -1,0 +1,330 @@
+"""FastAPI application exposing synchronous and durable Agent execution."""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+import json
+import logging
+import time
+from typing import Any, AsyncIterator, Callable
+import uuid
+
+from fastapi import FastAPI, Header, Query, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
+from sqlalchemy import select, text
+
+from logging_config import configure_logging
+from weather_window import run_prompt
+from .config import Settings
+from .database import Database
+from .errors import ApiError
+from .models import AgentRun, AgentSession, Message, RunStatus, TERMINAL_RUN_STATUSES
+from .schemas import (
+    HealthResponse,
+    InvokeRequest,
+    InvokeResponse,
+    MessageCreate,
+    MessageResponse,
+    QueuedRunResponse,
+    RunResponse,
+    SessionCreate,
+    SessionResponse,
+)
+from .store import (
+    enqueue_message,
+    read_events_after,
+    request_cancellation,
+    run_to_dict,
+)
+
+logger = logging.getLogger(__name__)
+SyncRunner = Callable[..., Any]
+
+
+def _answer_dict(answer: Any) -> dict[str, Any]:
+    if isinstance(answer, BaseModel):
+        result = answer.model_dump(mode="json")
+    elif isinstance(answer, dict):
+        result = answer
+    else:
+        result = {"answer": str(answer), "reference": []}
+    result.setdefault("answer", "")
+    result.setdefault("reference", [])
+    return result
+
+
+def _error_payload(
+    request: Request,
+    error_code: str,
+    message: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "error_code": error_code,
+        "message": message,
+        "details": details or {},
+        "request_id": getattr(request.state, "request_id", None),
+    }
+
+
+def _format_sse(event: dict[str, Any]) -> str:
+    payload = {
+        "sequence": event["sequence"],
+        "type": event["event_type"],
+        "data": event["data"],
+        "created_at": event["created_at"],
+    }
+    return (
+        f"id: {event['sequence']}\n"
+        f"event: {event['event_type']}\n"
+        f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+    )
+
+
+def create_app(
+    *,
+    database: Database | None = None,
+    settings: Settings | None = None,
+    sync_runner: SyncRunner = run_prompt,
+) -> FastAPI:
+    runtime_settings = settings or Settings.from_env()
+    runtime_database = database or Database(runtime_settings.database_url)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        configure_logging()
+        runtime_database.create_schema()
+        yield
+
+    application = FastAPI(
+        title="Weather-aware Travel Planner Agent API",
+        version="0.2.0",
+        description="同步调用、持久化会话、独立 Worker 与 SSE 进度事件。",
+        lifespan=lifespan,
+    )
+    application.state.database = runtime_database
+    application.state.settings = runtime_settings
+    application.state.sync_runner = sync_runner
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(runtime_settings.cors_origins),
+        allow_credentials=True,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "Last-Event-ID", "X-Request-ID"],
+    )
+
+    @application.middleware("http")
+    async def request_context(request: Request, call_next: Callable[..., Any]) -> Any:
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        request.state.request_id = request_id
+        started = time.perf_counter()
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        logger.info(
+            "http request completed",
+            extra={"event": "http_request", "request_id": request_id},
+        )
+        response.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - started) * 1000:.2f}"
+        return response
+
+    @application.exception_handler(ApiError)
+    async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_error_payload(request, exc.error_code, exc.message, exc.details),
+        )
+
+    @application.exception_handler(RequestValidationError)
+    async def validation_error_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=_error_payload(
+                request,
+                "VALIDATION_ERROR",
+                "请求参数校验失败。",
+                {"errors": exc.errors()},
+            ),
+        )
+
+    @application.get("/health", response_model=HealthResponse, tags=["system"])
+    def health() -> HealthResponse:
+        with runtime_database.session_factory() as session:
+            session.execute(text("SELECT 1"))
+        return HealthResponse(status="ok", database="reachable")
+
+    @application.post(
+        "/v1/agent/invoke",
+        response_model=InvokeResponse,
+        tags=["agent"],
+        summary="同步执行 Agent（开发和演示用途）",
+    )
+    def invoke_agent(payload: InvokeRequest) -> InvokeResponse:
+        try:
+            result = _answer_dict(sync_runner(payload.prompt))
+        except RuntimeError as exc:
+            raise ApiError(503, "AGENT_UNAVAILABLE", str(exc)) from exc
+        except Exception as exc:
+            logger.error(
+                "synchronous agent invocation failed",
+                extra={"event": "run_failed", "error_code": "AGENT_EXECUTION_FAILED"},
+            )
+            raise ApiError(
+                502,
+                "AGENT_EXECUTION_FAILED",
+                "Agent 执行失败，请使用 X-Request-ID 查询服务日志。",
+            ) from exc
+        return InvokeResponse.model_validate(result)
+
+    @application.post(
+        "/v1/sessions",
+        response_model=SessionResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["sessions"],
+    )
+    def create_session(payload: SessionCreate) -> AgentSession:
+        with runtime_database.session_factory.begin() as session:
+            conversation = AgentSession(title=payload.title)
+            session.add(conversation)
+            session.flush()
+            return conversation
+
+    @application.get(
+        "/v1/sessions/{session_id}",
+        response_model=SessionResponse,
+        tags=["sessions"],
+    )
+    def get_session(session_id: str) -> AgentSession:
+        with runtime_database.session_factory() as session:
+            conversation = session.get(AgentSession, session_id)
+            if conversation is None:
+                raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在。")
+            return conversation
+
+    @application.get(
+        "/v1/sessions/{session_id}/messages",
+        response_model=list[MessageResponse],
+        tags=["sessions"],
+    )
+    def list_messages(session_id: str) -> list[Message]:
+        with runtime_database.session_factory() as session:
+            if session.get(AgentSession, session_id) is None:
+                raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在。")
+            return list(
+                session.scalars(
+                    select(Message)
+                    .where(Message.session_id == session_id)
+                    .order_by(Message.created_at, Message.id)
+                )
+            )
+
+    @application.post(
+        "/v1/sessions/{session_id}/messages",
+        response_model=QueuedRunResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+        tags=["runs"],
+        summary="保存消息并创建异步 Agent Run",
+    )
+    def submit_message(
+        session_id: str,
+        payload: MessageCreate,
+        request: Request,
+    ) -> QueuedRunResponse:
+        queued = enqueue_message(runtime_database, session_id, payload.content)
+        if queued is None:
+            raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在。")
+        message, run = queued
+        return QueuedRunResponse(
+            message=MessageResponse.model_validate(message),
+            run=RunResponse.model_validate(run_to_dict(run)),
+            events_url=str(request.url_for("stream_run_events", run_id=run.id)),
+        )
+
+    @application.get(
+        "/v1/runs/{run_id}",
+        response_model=RunResponse,
+        tags=["runs"],
+    )
+    def get_run(run_id: str) -> RunResponse:
+        with runtime_database.session_factory() as session:
+            run = session.get(AgentRun, run_id)
+            if run is None:
+                raise ApiError(404, "RUN_NOT_FOUND", "Agent Run 不存在。")
+            return RunResponse.model_validate(run_to_dict(run))
+
+    @application.post(
+        "/v1/runs/{run_id}/cancel",
+        response_model=RunResponse,
+        tags=["runs"],
+    )
+    def cancel_run(run_id: str) -> RunResponse:
+        run = request_cancellation(runtime_database, run_id)
+        if run is None:
+            raise ApiError(404, "RUN_NOT_FOUND", "Agent Run 不存在。")
+        return RunResponse.model_validate(run_to_dict(run))
+
+    @application.get(
+        "/v1/runs/{run_id}/events",
+        name="stream_run_events",
+        tags=["runs"],
+        summary="通过 Server-Sent Events 推送持久化进度",
+    )
+    async def stream_run_events(
+        run_id: str,
+        request: Request,
+        after: int = Query(default=0, ge=0),
+        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    ) -> StreamingResponse:
+        with runtime_database.session_factory() as session:
+            if session.get(AgentRun, run_id) is None:
+                raise ApiError(404, "RUN_NOT_FOUND", "Agent Run 不存在。")
+        cursor = after
+        if last_event_id:
+            try:
+                cursor = max(cursor, int(last_event_id))
+            except ValueError as exc:
+                raise ApiError(400, "INVALID_LAST_EVENT_ID", "Last-Event-ID 必须是整数。") from exc
+
+        async def event_stream() -> AsyncIterator[str]:
+            nonlocal cursor
+            last_write = time.monotonic()
+            while True:
+                if await request.is_disconnected():
+                    return
+                events, run_status = await asyncio.to_thread(
+                    read_events_after,
+                    runtime_database,
+                    run_id,
+                    cursor,
+                )
+                for event in events:
+                    cursor = event["sequence"]
+                    last_write = time.monotonic()
+                    yield _format_sse(event)
+                if run_status in TERMINAL_RUN_STATUSES:
+                    return
+                if time.monotonic() - last_write >= runtime_settings.sse_heartbeat_seconds:
+                    last_write = time.monotonic()
+                    yield ": heartbeat\n\n"
+                await asyncio.sleep(runtime_settings.sse_poll_seconds)
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    return application
+
+
+app = create_app()

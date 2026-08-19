@@ -68,9 +68,17 @@ def create_travel_agent(*, model_name: str = "deepseek-chat") -> Any:
     )
 
 
-def run_prompt(prompt: str) -> AnswerInfo:
+def run_prompt(
+    prompt: str,
+    *,
+    callbacks: Sequence[Any] | None = None,
+) -> AnswerInfo:
     """Run one prompt through a newly created Agent."""
-    result = create_travel_agent().invoke({"messages": [HumanMessage(content=prompt)]})
+    config = {"callbacks": list(callbacks)} if callbacks else None
+    result = create_travel_agent().invoke(
+        {"messages": [HumanMessage(content=prompt)]},
+        config=config,
+    )
     answer = result.get("structured_response")
     if answer is None:
         raise RuntimeError("Agent 没有生成结构化结果")

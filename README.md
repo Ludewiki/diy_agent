@@ -2,13 +2,18 @@
 
 一个面向全球城市的多工具旅行规划 Agent 原型。它先用确定性算法从近期预报中选择连续天气窗口，再从 Wikivoyage 提取景点，结合用户兴趣评分、OpenRouteService（ORS）交通矩阵、容量约束 K-Medoids 和匈牙利算法，生成按天气分配的多日路线。
 
-当前项目重点是“可解释的 Tool 与 Agent 编排”，不是订票支付产品。酒店搜索、携程等供应商适配、持久化会话和生产级任务运行时仍在路线图中。
+当前项目重点是“可解释的 Tool 与 Agent 编排”。目前已提供 FastAPI、持久化会话/消息/Run、独立 Worker 和 SSE 进度事件；酒店搜索、携程等供应商适配与生产级分布式运行时仍在路线图中。
 
 ## 工作流与架构
 
 ```mermaid
 flowchart LR
-    U[用户请求] --> A[LangChain Agent]
+    U[网页/飞书] --> F[FastAPI]
+    F --> DB[(Session/Message/Run/Event)]
+    F -->|同步演示| A[LangChain Agent]
+    F -->|异步入队| DB
+    WK[独立 Worker] -->|领取 PENDING Run| DB
+    WK --> A
     A --> W[天气 Tool]
     W --> S[逐日评分与连续窗口]
     S --> P[攻略 Tool]
@@ -20,7 +25,9 @@ flowchart LR
     K --> H[天气与景点组匹配]
     H --> D[日内开放路径]
     D --> A
-    A --> U
+    A --> DB
+    DB -->|SSE 断线续传| F
+    F --> U
 ```
 
 `weather_window.py` 是显式应用入口；导入任何模块都不会创建模型、调用 LLM 或发起 HTTP 请求。
@@ -37,8 +44,12 @@ flowchart LR
 | `travel_planner/service.py` | 确定性业务编排、日志和失败降级 |
 | `travel_planner/tool.py` | LangChain Tool 适配 |
 | `travel_planner_tool.py` | 旧导入路径兼容层 |
+| `app/main.py` | FastAPI 路由、同步调用、Run API 与 SSE |
+| `app/models.py` | Session、Message、AgentRun、RunEvent 持久化模型 |
+| `app/worker.py` | 独立进程领取并执行耗时 Agent Run |
+| `app/callbacks.py` | 将模型/Tool 生命周期写成持久化进度事件 |
 
-详细决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md) 和 [ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)。
+详细决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md) 和 [ADR 0003](docs/adr/0003-durable-worker-and-sse.md)。
 
 ## 数据源
 
@@ -68,6 +79,7 @@ ORS_API_KEY=your_ors_key
 WIKIMEDIA_USER_AGENT=TravelPlannerAgent/0.1 (contact: you@example.com)
 LOG_LEVEL=INFO
 PYTHONUTF8=1
+DATABASE_URL=sqlite:///./resources/agent_api.db
 ```
 
 运行完整 Agent：
@@ -92,6 +104,33 @@ agent = create_travel_agent()
 
 生产部署不应加载文件型 `.env`，而应由容器平台、Vault/KMS 或 CI/CD Secret 将密钥注入进程环境。
 
+## FastAPI、Worker 与 SSE
+
+本地开发需要打开两个 PowerShell。第一个启动 API：
+
+```powershell
+uv run uvicorn app.main:app --reload --env-file .env
+```
+
+第二个启动独立 Worker：
+
+```powershell
+uv run python -m app.worker --env-file .env
+```
+
+启动后访问 `http://127.0.0.1:8000/docs` 查看自动生成的 OpenAPI 文档。
+
+| 接口 | 作用 |
+| --- | --- |
+| `POST /v1/agent/invoke` | 同步调用现有 Agent，适合开发演示 |
+| `POST /v1/sessions` | 创建会话 |
+| `POST /v1/sessions/{id}/messages` | 保存用户消息并返回 `PENDING` Run |
+| `GET /v1/runs/{run_id}` | 查询 Run 状态和最终结构化结果 |
+| `GET /v1/runs/{run_id}/events` | SSE 进度流，支持 `Last-Event-ID` 续传 |
+| `POST /v1/runs/{run_id}/cancel` | 取消待执行任务；运行中任务在 Tool 边界协作取消 |
+
+推荐客户端工作流是“创建 Session → 提交 Message → 连接 events_url → 完成后读取 Run”。同步接口会占用一个服务线程，不应作为高并发生产入口。默认 SQLite 数据库兼作本地持久化队列；它支持单机 Demo 和单/少量 Worker，生产环境应迁移 PostgreSQL，并在多机规模下换成 Redis/RabbitMQ 等专用队列。
+
 ## 测试
 
 ```powershell
@@ -99,13 +138,13 @@ uv run pytest
 python -m py_compile weather_tool.py weather_window.py travel_planner_tool.py
 ```
 
-默认测试完全离线，覆盖天气评分与连续窗口、Schema、Wikivoyage Listing 解析、景点评分、容量聚类、最短开放路径、匈牙利匹配、统一错误结构和导入零副作用。实时第三方 API 测试必须标记为 `integration`，不能进入默认快速测试。
+默认测试完全离线，覆盖天气算法、攻略解析、评分/聚类/路由、统一错误结构、导入零副作用，以及 FastAPI 同步调用、Session/Message/Run、Worker、取消、SSE 回放和断线续传。实时第三方 API 测试必须标记为 `integration`，不能进入默认快速测试。
 
 ## 演示截图
 
 ![离线测试与导入安全演示](docs/images/test-demo.svg)
 
-截图对应本次本地回归结果：`12 passed`。实际行程内容依赖实时天气、Wikivoyage 页面和 ORS 配额，因此不把一次运行结果当成稳定测试快照。
+截图展示离线测试方式；当前本地回归结果为 `17 passed`。实际行程内容依赖实时天气、Wikivoyage 页面和 ORS 配额，因此不把一次运行结果当成稳定测试快照。
 
 ## 错误、日志与编码约定
 
@@ -130,13 +169,14 @@ python -m py_compile weather_tool.py weather_window.py travel_planner_tool.py
 - ORS 地理编码可能误匹配同名景点；低于置信度阈值的结果会被拒绝，但仍需人工复核。
 - 路线是估算结果，尚未包含实时拥堵、公交班次、预约时段、无障碍和跨日行李约束。
 - 尚未实现酒店/机票只读搜索、供应商适配层、人工确认和支付；不得用抓取脚本代替授权预订接口。
-- 尚未实现 FastAPI 会话/Run API、PostgreSQL 长期偏好、Redis Worker、SSE 流式事件、取消/恢复、OpenTelemetry 和并发压测。
+- 本地运行时使用 SQLite 数据库队列；尚未加入 PostgreSQL 迁移、Redis/RabbitMQ、租约超时、崩溃后自动回收 RUNNING 任务和多 Worker 压测。
+- 当前支持 SSE 事件重放和协作取消，但没有暂停/恢复 checkpoint、身份认证、配额、OpenTelemetry 和分布式追踪。
 
-建议下一阶段按顺序完成：Agent Run 状态机与 FastAPI → PostgreSQL 会话/偏好 → SSE 与可观测性 → 酒店只读推荐及人工确认 → 飞书 Bot。
+建议下一阶段按顺序完成：Alembic 与 PostgreSQL → 用户身份/偏好 → 任务租约与重试 → OpenTelemetry → 酒店只读推荐及人工确认 → 飞书 Bot。
 
 ## GitHub 协作
 
-当前工作目录如果还不是 Git 仓库，先在你确认远程地址和作者信息后初始化；不要为了“看起来有历史”制造无意义提交。后续按 [CONTRIBUTING.md](CONTRIBUTING.md) 将 Schema/安全、模块拆分、测试、文档等变更拆成可审查提交，并用 `.github/ISSUE_TEMPLATE` 记录需求和缺陷。架构变化继续追加 ADR，不改写已经 Accepted 的历史决策。
+仓库已使用 `main` 分支并绑定 GitHub。后续按 [CONTRIBUTING.md](CONTRIBUTING.md) 将 Schema/安全、模块拆分、测试、文档等变更拆成可审查提交，并用 `.github/ISSUE_TEMPLATE` 记录需求和缺陷。架构变化继续追加 ADR，不改写已经 Accepted 的历史决策。
 
 提交前至少确认：
 

@@ -10,7 +10,7 @@
   <g fill="#e5e7eb" font-family="Consolas, 'Microsoft YaHei', monospace" font-size="18">
     <text x="30" y="92"><tspan fill="#34d399">PS&gt;</tspan> uv run --offline pytest</text>
     <text x="30" y="132">............</text>
-    <text x="30" y="172" fill="#6ee7b7">12 passed in 2.61s</text>
+    <text x="30" y="172" fill="#6ee7b7">17 passed</text>
     <text x="30" y="228"><tspan fill="#34d399">PS&gt;</tspan> python -c "import weather_window"</text>
     <text x="30" y="268" fill="#93c5fd"># no model call, no HTTP request, no output</text>
     <text x="30" y="324"><tspan fill="#34d399">PS&gt;</tspan> python -m py_compile weather_tool.py travel_planner_tool.py</text>
