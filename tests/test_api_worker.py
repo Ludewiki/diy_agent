@@ -83,7 +83,7 @@ def test_worker_executes_run_and_sse_replays_events(
             callback.on_tool_end({"status": "ok"}, run_id=tool_run_id)
         return {"answer": f"异步回答：{prompt}", "reference": []}
 
-    assert run_once(database, fake_runner) == run_id
+    assert str(run_once(database, fake_runner)) == run_id
     run = client.get(f"/v1/runs/{run_id}").json()
     assert run["status"] == "SUCCEEDED"
     assert run["output"]["answer"].startswith("异步回答")
@@ -115,7 +115,7 @@ def test_pending_run_can_be_cancelled(client: TestClient) -> None:
 
 
 def test_api_errors_use_stable_contract(client: TestClient) -> None:
-    response = client.get("/v1/runs/not-found")
+    response = client.get(f"/v1/runs/{uuid.uuid4()}")
     assert response.status_code == 404
     assert response.json()["error_code"] == "RUN_NOT_FOUND"
     validation = client.post("/v1/agent/invoke", json={"prompt": ""})

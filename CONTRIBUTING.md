@@ -13,7 +13,12 @@
 ```powershell
 uv sync --dev
 uv run pytest
-python -m py_compile weather_tool.py weather_window.py travel_planner_tool.py
+uv run alembic heads
+uv run alembic upgrade head --sql
+uv run python -m compileall -q app migrations tests
+git diff --check
 ```
+
+数据库模型变更必须同时提交经过人工审查的 Alembic migration。需要运行 PostgreSQL 集成测试时，只能把 `TEST_DATABASE_URL` 指向名称以 `_test` 结尾的专用数据库；测试会清空该数据库的 `public` Schema。
 
 严禁提交 `.env`、真实密钥、用户原始隐私数据、本地 checkpoint 数据库和包含 Cookie 的抓取结果。若密钥曾进入 Git 历史，仅删除文件不够，必须立即轮换密钥并清理历史。

@@ -1,6 +1,6 @@
 # Security Policy
 
-密钥只能由环境变量或部署平台的 Secret/Vault/KMS 注入。本地 `.env` 已被忽略，`.env.example` 只能保留空值。
+密钥和 PostgreSQL 连接串只能由环境变量或部署平台的 Secret/Vault/KMS 注入。本地 `.env` 已被忽略，`.env.example` 只能保留空值或无效的本地占位值。生产数据库应使用独立的最小权限账号和加密连接。
 
 不要在 Issue、日志、截图、测试夹具或 Agent 消息中记录 API Key、Cookie、Authorization Header、手机号、身份证件、支付信息或未经脱敏的用户偏好。日志只记录 `request_id`、工具名、状态和稳定错误码。
 

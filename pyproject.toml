@@ -1,10 +1,11 @@
 [project]
 name = "project-of-python"
-version = "0.1.0"
+version = "0.3.0"
 description = "Weather-aware multi-tool AI Agent for global travel itinerary planning"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "alembic>=1.16.0",
     "dashscope>=1.26.3",
     "fastapi>=0.116.0",
     "ipykernel>=7.3.0",
@@ -14,11 +15,11 @@ dependencies = [
     "langchain-deepseek>=1.1.0",
     "langchain-tavily>=0.2.18",
     "langgraph>=1.2.9",
-    "langgraph-checkpoint-sqlite>=3.1.1",
     "mwparserfromhell>=0.7.2",
     "notebook>=7.6.0",
     "openai>=2.45.0",
     "pydantic>=2",
+    "psycopg[binary]>=3.2.0",
     "python-dotenv>=1.2.2",
     "requests>=2.34.2",
     "sqlalchemy>=2.0.51",
@@ -37,4 +38,5 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "integration: tests that call live third-party services",
+    "postgres: tests that require a dedicated PostgreSQL test database",
 ]

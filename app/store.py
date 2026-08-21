@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 import json
 from typing import Any
+import uuid
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from .database import Database
@@ -20,15 +22,26 @@ from .models import (
 )
 
 
-def decode_json(value: str | None) -> dict[str, Any] | None:
+class WorkerLeaseLost(RuntimeError):
+    """Raised when a stale Worker tries to mutate a reclaimed Run."""
+
+
+def _lease_is_active(lease_expires_at: Any) -> bool:
+    if lease_expires_at is None:
+        return False
+    now = utc_now()
+    if getattr(lease_expires_at, "tzinfo", None) is None:
+        now = now.replace(tzinfo=None)
+    return bool(lease_expires_at > now)
+
+
+def decode_json(value: dict[str, Any] | str | None) -> dict[str, Any] | None:
     if value is None:
         return None
+    if isinstance(value, dict):
+        return value
     decoded = json.loads(value)
     return decoded if isinstance(decoded, dict) else {"value": decoded}
-
-
-def encode_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
 
 
 def run_to_dict(run: AgentRun) -> dict[str, Any]:
@@ -42,18 +55,42 @@ def run_to_dict(run: AgentRun) -> dict[str, Any]:
         "error_code": run.error_code,
         "error_message": run.error_message,
         "cancel_requested": run.cancel_requested,
+        "worker_id": run.worker_id,
+        "lease_expires_at": run.lease_expires_at,
+        "heartbeat_at": run.heartbeat_at,
+        "attempt_count": run.attempt_count,
+        "max_attempts": run.max_attempts,
+        "next_retry_at": run.next_retry_at,
         "created_at": run.created_at,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
     }
 
 
+def _locked_run(session: Session, run_id: uuid.UUID) -> AgentRun | None:
+    statement = select(AgentRun).where(AgentRun.id == run_id)
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        statement = statement.with_for_update()
+    return session.scalar(statement)
+
+
 def append_event_in_session(
     session: Session,
-    run_id: str,
+    run_id: uuid.UUID,
     event_type: str,
     data: dict[str, Any] | None = None,
+    *,
+    expected_worker_id: str | None = None,
 ) -> RunEvent:
+    run = _locked_run(session, run_id)
+    if run is None:
+        raise LookupError(f"Run 不存在：{run_id}")
+    if expected_worker_id is not None and (
+        run.worker_id != expected_worker_id
+        or run.status != RunStatus.RUNNING.value
+        or not _lease_is_active(run.lease_expires_at)
+    ):
+        raise WorkerLeaseLost(f"Worker 已失去 Run {run_id} 的租约。")
     latest = session.scalar(
         select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)
     )
@@ -61,7 +98,7 @@ def append_event_in_session(
         run_id=run_id,
         sequence=int(latest or 0) + 1,
         event_type=event_type,
-        data_json=encode_json(data or {}),
+        data_json=data or {},
     )
     session.add(event)
     session.flush()
@@ -70,18 +107,28 @@ def append_event_in_session(
 
 def append_event(
     database: Database,
-    run_id: str,
+    run_id: uuid.UUID,
     event_type: str,
     data: dict[str, Any] | None = None,
+    *,
+    expected_worker_id: str | None = None,
 ) -> RunEvent:
     with database.session_factory.begin() as session:
-        return append_event_in_session(session, run_id, event_type, data)
+        return append_event_in_session(
+            session,
+            run_id,
+            event_type,
+            data,
+            expected_worker_id=expected_worker_id,
+        )
 
 
 def enqueue_message(
     database: Database,
-    session_id: str,
+    session_id: uuid.UUID,
     content: str,
+    *,
+    max_attempts: int = 3,
 ) -> tuple[Message, AgentRun] | None:
     with database.session_factory.begin() as session:
         conversation = session.get(AgentSession, session_id)
@@ -94,58 +141,177 @@ def enqueue_message(
         )
         session.add(message)
         session.flush()
-        run = AgentRun(session_id=session_id, user_message_id=message.id)
+        run = AgentRun(
+            session_id=session_id,
+            user_message_id=message.id,
+            max_attempts=max_attempts,
+        )
         session.add(run)
         session.flush()
         append_event_in_session(
             session,
             run.id,
             "RUN_QUEUED",
-            {"status": RunStatus.PENDING.value},
+            {"status": RunStatus.PENDING.value, "max_attempts": max_attempts},
         )
         conversation.updated_at = utc_now()
         return message, run
 
 
-def claim_next_run(database: Database) -> str | None:
-    """Atomically transition the oldest pending run to RUNNING."""
+def _mark_terminal_expired_runs(session: Session, database: Database) -> None:
+    now = utc_now()
+    statement = (
+        select(AgentRun)
+        .where(
+            AgentRun.status == RunStatus.RUNNING.value,
+            AgentRun.lease_expires_at.is_not(None),
+            AgentRun.lease_expires_at <= now,
+            or_(
+                AgentRun.cancel_requested.is_(True),
+                AgentRun.attempt_count >= AgentRun.max_attempts,
+            ),
+        )
+        .limit(20)
+    )
+    if database.is_postgresql:
+        statement = statement.with_for_update(skip_locked=True)
+    for run in session.scalars(statement):
+        cancelled = run.cancel_requested
+        run.status = (
+            RunStatus.CANCELLED.value if cancelled else RunStatus.FAILED.value
+        )
+        run.error_code = "RUN_CANCELLED" if cancelled else "MAX_ATTEMPTS_EXCEEDED"
+        run.error_message = (
+            "用户已请求取消任务。"
+            if cancelled
+            else "Worker 租约过期且已达到最大尝试次数。"
+        )
+        run.worker_id = None
+        run.lease_expires_at = None
+        run.finished_at = now
+        run.updated_at = now
+        append_event_in_session(
+            session,
+            run.id,
+            "RUN_CANCELLED" if cancelled else "RUN_FAILED",
+            {
+                "status": RunStatus.FAILED.value,
+                "error_code": run.error_code,
+                "message": run.error_message,
+            },
+        )
+
+
+def claim_next_run(
+    database: Database,
+    worker_id: str,
+    lease_seconds: float,
+) -> uuid.UUID | None:
+    """Claim one eligible Run with PostgreSQL ``SKIP LOCKED`` semantics."""
     with database.session_factory.begin() as session:
-        run_id = session.scalar(
-            select(AgentRun.id)
+        _mark_terminal_expired_runs(session, database)
+        now = utc_now()
+        pending_ready = and_(
+            AgentRun.status == RunStatus.PENDING.value,
+            or_(AgentRun.next_retry_at.is_(None), AgentRun.next_retry_at <= now),
+        )
+        expired_running = and_(
+            AgentRun.status == RunStatus.RUNNING.value,
+            AgentRun.lease_expires_at.is_not(None),
+            AgentRun.lease_expires_at <= now,
+            AgentRun.attempt_count < AgentRun.max_attempts,
+        )
+        statement = (
+            select(AgentRun)
             .where(
-                AgentRun.status == RunStatus.PENDING.value,
                 AgentRun.cancel_requested.is_(False),
+                or_(pending_ready, expired_running),
             )
             .order_by(AgentRun.created_at, AgentRun.id)
             .limit(1)
         )
-        if run_id is None:
+        if database.is_postgresql:
+            statement = statement.with_for_update(skip_locked=True)
+        run = session.scalar(statement)
+        if run is None:
             return None
-        claimed_at = utc_now()
+        reclaimed = run.status == RunStatus.RUNNING.value
+        retrying = run.attempt_count > 0 and not reclaimed
+        run.status = RunStatus.RUNNING.value
+        run.worker_id = worker_id
+        run.heartbeat_at = now
+        run.lease_expires_at = now + timedelta(seconds=lease_seconds)
+        run.next_retry_at = None
+        run.attempt_count += 1
+        run.started_at = run.started_at or now
+        run.finished_at = None
+        run.updated_at = now
+        event_type = (
+            "RUN_RECLAIMED"
+            if reclaimed
+            else "RUN_RETRY_STARTED"
+            if retrying
+            else "RUN_STARTED"
+        )
+        append_event_in_session(
+            session,
+            run.id,
+            event_type,
+            {
+                "status": RunStatus.RUNNING.value,
+                "worker_id": worker_id,
+                "attempt": run.attempt_count,
+                "lease_expires_at": run.lease_expires_at.isoformat(),
+            },
+            expected_worker_id=worker_id,
+        )
+        return run.id
+
+
+def renew_lease(
+    database: Database,
+    run_id: uuid.UUID,
+    worker_id: str,
+    lease_seconds: float,
+) -> bool:
+    now = utc_now()
+    with database.session_factory.begin() as session:
         result = session.execute(
             update(AgentRun)
             .where(
                 AgentRun.id == run_id,
-                AgentRun.status == RunStatus.PENDING.value,
+                AgentRun.status == RunStatus.RUNNING.value,
+                AgentRun.worker_id == worker_id,
+                AgentRun.lease_expires_at.is_not(None),
+                AgentRun.lease_expires_at > now,
             )
             .values(
-                status=RunStatus.RUNNING.value,
-                started_at=claimed_at,
-                updated_at=claimed_at,
+                heartbeat_at=now,
+                lease_expires_at=now + timedelta(seconds=lease_seconds),
+                updated_at=now,
             )
         )
-        if result.rowcount != 1:
-            return None
-        append_event_in_session(
-            session,
-            run_id,
-            "RUN_STARTED",
-            {"status": RunStatus.RUNNING.value},
+        return result.rowcount == 1
+
+
+def worker_has_lease(
+    database: Database,
+    run_id: uuid.UUID,
+    worker_id: str,
+) -> bool:
+    with database.session_factory() as session:
+        owner = session.scalar(
+            select(AgentRun.worker_id).where(
+                AgentRun.id == run_id,
+                AgentRun.status == RunStatus.RUNNING.value,
+                AgentRun.lease_expires_at.is_not(None),
+                AgentRun.lease_expires_at > utc_now(),
+            )
         )
-        return run_id
+        return owner == worker_id
 
 
-def get_run_prompt(database: Database, run_id: str) -> str | None:
+def get_run_prompt(database: Database, run_id: uuid.UUID) -> str | None:
     with database.session_factory() as session:
         run = session.get(AgentRun, run_id)
         if run is None:
@@ -154,7 +320,7 @@ def get_run_prompt(database: Database, run_id: str) -> str | None:
         return message.content if message is not None else None
 
 
-def is_cancel_requested(database: Database, run_id: str) -> bool:
+def is_cancel_requested(database: Database, run_id: uuid.UUID) -> bool:
     with database.session_factory() as session:
         value = session.scalar(
             select(AgentRun.cancel_requested).where(AgentRun.id == run_id)
@@ -162,21 +328,34 @@ def is_cancel_requested(database: Database, run_id: str) -> bool:
         return bool(value)
 
 
-def complete_run(database: Database, run_id: str, output: dict[str, Any]) -> None:
+def complete_run(
+    database: Database,
+    run_id: uuid.UUID,
+    worker_id: str,
+    output: dict[str, Any],
+) -> bool:
     with database.session_factory.begin() as session:
-        run = session.get(AgentRun, run_id)
+        run = _locked_run(session, run_id)
         if run is None:
-            return
+            return False
+        if (
+            run.worker_id != worker_id
+            or run.status != RunStatus.RUNNING.value
+            or not _lease_is_active(run.lease_expires_at)
+        ):
+            raise WorkerLeaseLost(f"Worker 已失去 Run {run_id} 的租约。")
         if run.cancel_requested:
             run.status = RunStatus.CANCELLED.value
             run.finished_at = utc_now()
+            run.worker_id = None
+            run.lease_expires_at = None
             append_event_in_session(
                 session,
                 run_id,
                 "RUN_CANCELLED",
                 {"status": RunStatus.CANCELLED.value},
             )
-            return
+            return True
         assistant = Message(
             session_id=run.session_id,
             role=MessageRole.ASSISTANT.value,
@@ -185,9 +364,14 @@ def complete_run(database: Database, run_id: str, output: dict[str, Any]) -> Non
         session.add(assistant)
         session.flush()
         run.assistant_message_id = assistant.id
-        run.output_json = encode_json(output)
+        run.output_json = output
         run.status = RunStatus.SUCCEEDED.value
-        run.finished_at = utc_now()
+        run.error_code = None
+        run.error_message = None
+        run.worker_id = None
+        run.lease_expires_at = None
+        run.heartbeat_at = utc_now()
+        run.finished_at = run.heartbeat_at
         run.updated_at = run.finished_at
         append_event_in_session(
             session,
@@ -195,39 +379,71 @@ def complete_run(database: Database, run_id: str, output: dict[str, Any]) -> Non
             "RUN_SUCCEEDED",
             {"status": RunStatus.SUCCEEDED.value},
         )
+        return True
 
 
 def fail_run(
     database: Database,
-    run_id: str,
+    run_id: uuid.UUID,
+    worker_id: str,
     error_code: str,
     error_message: str,
-) -> None:
+    *,
+    retryable: bool,
+    retry_delay_seconds: float,
+) -> bool:
     with database.session_factory.begin() as session:
-        run = session.get(AgentRun, run_id)
+        run = _locked_run(session, run_id)
         if run is None:
-            return
-        cancelled = run.cancel_requested
-        run.status = RunStatus.CANCELLED.value if cancelled else RunStatus.FAILED.value
-        run.error_code = "RUN_CANCELLED" if cancelled else error_code
-        run.error_message = "用户已请求取消任务。" if cancelled else error_message
-        run.finished_at = utc_now()
-        run.updated_at = run.finished_at
+            return False
+        if (
+            run.worker_id != worker_id
+            or run.status != RunStatus.RUNNING.value
+            or not _lease_is_active(run.lease_expires_at)
+        ):
+            raise WorkerLeaseLost(f"Worker 已失去 Run {run_id} 的租约。")
+        now = utc_now()
+        if run.cancel_requested:
+            run.status = RunStatus.CANCELLED.value
+            run.error_code = "RUN_CANCELLED"
+            run.error_message = "用户已请求取消任务。"
+            event_type = "RUN_CANCELLED"
+            run.finished_at = now
+        elif retryable and run.attempt_count < run.max_attempts:
+            run.status = RunStatus.PENDING.value
+            run.error_code = error_code
+            run.error_message = error_message
+            run.next_retry_at = now + timedelta(seconds=retry_delay_seconds)
+            event_type = "RUN_RETRY_SCHEDULED"
+        else:
+            run.status = RunStatus.FAILED.value
+            run.error_code = error_code
+            run.error_message = error_message
+            run.finished_at = now
+            event_type = "RUN_FAILED"
+        run.worker_id = None
+        run.lease_expires_at = None
+        run.updated_at = now
         append_event_in_session(
             session,
             run_id,
-            "RUN_CANCELLED" if cancelled else "RUN_FAILED",
+            event_type,
             {
                 "status": run.status,
                 "error_code": run.error_code,
                 "message": run.error_message,
+                "attempt": run.attempt_count,
+                "next_retry_at": (
+                    run.next_retry_at.isoformat() if run.next_retry_at else None
+                ),
             },
         )
+        return True
 
 
-def request_cancellation(database: Database, run_id: str) -> AgentRun | None:
+def request_cancellation(database: Database, run_id: uuid.UUID) -> AgentRun | None:
     with database.session_factory.begin() as session:
-        run = session.get(AgentRun, run_id)
+        run = _locked_run(session, run_id)
         if run is None:
             return None
         if run.status in {
@@ -259,7 +475,7 @@ def request_cancellation(database: Database, run_id: str) -> AgentRun | None:
 
 def read_events_after(
     database: Database,
-    run_id: str,
+    run_id: uuid.UUID,
     after_sequence: int,
 ) -> tuple[list[dict[str, Any]], str | None]:
     with database.session_factory() as session:

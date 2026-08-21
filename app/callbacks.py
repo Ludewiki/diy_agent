@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from typing import Any
+import uuid
 
 from langchain_core.callbacks import BaseCallbackHandler
 
 from .database import Database
-from .store import append_event, is_cancel_requested
+from .store import (
+    WorkerLeaseLost,
+    append_event,
+    is_cancel_requested,
+    worker_has_lease,
+)
 
 
 class RunCancelled(RuntimeError):
@@ -19,15 +25,38 @@ class ProgressCallback(BaseCallbackHandler):
 
     raise_error = True
 
-    def __init__(self, database: Database, agent_run_id: str) -> None:
+    def __init__(
+        self,
+        database: Database,
+        agent_run_id: uuid.UUID,
+        worker_id: str,
+    ) -> None:
         self.database = database
         self.agent_run_id = agent_run_id
+        self.worker_id = worker_id
         self._tool_names: dict[str, str] = {}
         self._thinking_emitted = False
 
     def _check_cancelled(self) -> None:
         if is_cancel_requested(self.database, self.agent_run_id):
             raise RunCancelled("用户已请求取消任务。")
+        if not worker_has_lease(
+            self.database,
+            self.agent_run_id,
+            self.worker_id,
+        ):
+            raise WorkerLeaseLost(
+                f"Worker 已失去 Run {self.agent_run_id} 的租约。"
+            )
+
+    def _append(self, event_type: str, data: dict[str, Any]) -> None:
+        append_event(
+            self.database,
+            self.agent_run_id,
+            event_type,
+            data,
+            expected_worker_id=self.worker_id,
+        )
 
     def on_chat_model_start(
         self,
@@ -39,9 +68,7 @@ class ProgressCallback(BaseCallbackHandler):
     ) -> None:
         self._check_cancelled()
         if not self._thinking_emitted:
-            append_event(
-                self.database,
-                self.agent_run_id,
+            self._append(
                 "AGENT_THINKING",
                 {"message": "Agent 正在分析请求并决定下一步工具调用。"},
             )
@@ -58,9 +85,7 @@ class ProgressCallback(BaseCallbackHandler):
         self._check_cancelled()
         name = str(serialized.get("name") or "unknown_tool")
         self._tool_names[str(run_id)] = name
-        append_event(
-            self.database,
-            self.agent_run_id,
+        self._append(
             "TOOL_STARTED",
             {"tool_name": name},
         )
@@ -73,9 +98,7 @@ class ProgressCallback(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         name = self._tool_names.pop(str(run_id), "unknown_tool")
-        append_event(
-            self.database,
-            self.agent_run_id,
+        self._append(
             "TOOL_SUCCEEDED",
             {"tool_name": name},
         )
@@ -89,9 +112,7 @@ class ProgressCallback(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         name = self._tool_names.pop(str(run_id), "unknown_tool")
-        append_event(
-            self.database,
-            self.agent_run_id,
+        self._append(
             "TOOL_FAILED",
             {"tool_name": name, "error_type": type(error).__name__},
         )

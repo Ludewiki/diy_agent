@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,7 +16,7 @@ class SessionCreate(BaseModel):
 class SessionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: uuid.UUID
     title: str | None
     status: str
     created_at: datetime
@@ -29,23 +30,29 @@ class MessageCreate(BaseModel):
 class MessageResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    session_id: str
+    id: uuid.UUID
+    session_id: uuid.UUID
     role: str
     content: str
     created_at: datetime
 
 
 class RunResponse(BaseModel):
-    id: str
-    session_id: str
-    user_message_id: str
-    assistant_message_id: str | None
+    id: uuid.UUID
+    session_id: uuid.UUID
+    user_message_id: uuid.UUID
+    assistant_message_id: uuid.UUID | None
     status: str
     output: dict[str, Any] | None
     error_code: str | None
     error_message: str | None
     cancel_requested: bool
+    worker_id: str | None
+    lease_expires_at: datetime | None
+    heartbeat_at: datetime | None
+    attempt_count: int
+    max_attempts: int
+    next_retry_at: datetime | None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None

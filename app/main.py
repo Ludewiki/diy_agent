@@ -15,7 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import select
 
 from logging_config import configure_logging
 from weather_window import run_prompt
@@ -93,18 +93,21 @@ def create_app(
     sync_runner: SyncRunner = run_prompt,
 ) -> FastAPI:
     runtime_settings = settings or Settings.from_env()
+    runtime_settings.validate()
     runtime_database = database or Database(runtime_settings.database_url)
+    if database is None:
+        runtime_database.require_postgresql()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         configure_logging()
-        runtime_database.create_schema()
+        runtime_database.check_connection()
         yield
 
     application = FastAPI(
         title="Weather-aware Travel Planner Agent API",
-        version="0.2.0",
-        description="同步调用、持久化会话、独立 Worker 与 SSE 进度事件。",
+        version="0.3.0",
+        description="PostgreSQL 会话、租约 Worker、重试与 SSE 进度事件。",
         lifespan=lifespan,
     )
     application.state.database = runtime_database
@@ -155,8 +158,7 @@ def create_app(
 
     @application.get("/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
-        with runtime_database.session_factory() as session:
-            session.execute(text("SELECT 1"))
+        runtime_database.check_connection()
         return HealthResponse(status="ok", database="reachable")
 
     @application.post(
@@ -200,7 +202,7 @@ def create_app(
         response_model=SessionResponse,
         tags=["sessions"],
     )
-    def get_session(session_id: str) -> AgentSession:
+    def get_session(session_id: uuid.UUID) -> AgentSession:
         with runtime_database.session_factory() as session:
             conversation = session.get(AgentSession, session_id)
             if conversation is None:
@@ -212,7 +214,7 @@ def create_app(
         response_model=list[MessageResponse],
         tags=["sessions"],
     )
-    def list_messages(session_id: str) -> list[Message]:
+    def list_messages(session_id: uuid.UUID) -> list[Message]:
         with runtime_database.session_factory() as session:
             if session.get(AgentSession, session_id) is None:
                 raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在。")
@@ -232,11 +234,16 @@ def create_app(
         summary="保存消息并创建异步 Agent Run",
     )
     def submit_message(
-        session_id: str,
+        session_id: uuid.UUID,
         payload: MessageCreate,
         request: Request,
     ) -> QueuedRunResponse:
-        queued = enqueue_message(runtime_database, session_id, payload.content)
+        queued = enqueue_message(
+            runtime_database,
+            session_id,
+            payload.content,
+            max_attempts=runtime_settings.worker_max_attempts,
+        )
         if queued is None:
             raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在。")
         message, run = queued
@@ -251,7 +258,7 @@ def create_app(
         response_model=RunResponse,
         tags=["runs"],
     )
-    def get_run(run_id: str) -> RunResponse:
+    def get_run(run_id: uuid.UUID) -> RunResponse:
         with runtime_database.session_factory() as session:
             run = session.get(AgentRun, run_id)
             if run is None:
@@ -263,7 +270,7 @@ def create_app(
         response_model=RunResponse,
         tags=["runs"],
     )
-    def cancel_run(run_id: str) -> RunResponse:
+    def cancel_run(run_id: uuid.UUID) -> RunResponse:
         run = request_cancellation(runtime_database, run_id)
         if run is None:
             raise ApiError(404, "RUN_NOT_FOUND", "Agent Run 不存在。")
@@ -276,7 +283,7 @@ def create_app(
         summary="通过 Server-Sent Events 推送持久化进度",
     )
     async def stream_run_events(
-        run_id: str,
+        run_id: uuid.UUID,
         request: Request,
         after: int = Query(default=0, ge=0),
         last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),

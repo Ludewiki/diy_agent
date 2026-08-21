@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
+from typing import Any
 import uuid
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -14,8 +16,11 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def new_id() -> str:
-    return str(uuid.uuid4())
+def new_id() -> uuid.UUID:
+    return uuid.uuid4()
+
+
+JSON_PAYLOAD = JSON().with_variant(JSONB, "postgresql")
 
 
 class SessionStatus(StrEnum):
@@ -52,7 +57,9 @@ class Base(DeclarativeBase):
 class AgentSession(Base):
     __tablename__ = "agent_sessions"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=new_id
+    )
     title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default=SessionStatus.ACTIVE.value, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -62,8 +69,10 @@ class AgentSession(Base):
 class Message(Base):
     __tablename__ = "messages"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    session_id: Mapped[str] = mapped_column(
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=new_id
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("agent_sessions.id", ondelete="CASCADE"), index=True
     )
     role: Mapped[str] = mapped_column(String(20))
@@ -73,19 +82,47 @@ class Message(Base):
 
 class AgentRun(Base):
     __tablename__ = "agent_runs"
-    __table_args__ = (Index("ix_agent_runs_status_created", "status", "created_at"),)
+    __table_args__ = (
+        Index(
+            "ix_agent_runs_dispatch",
+            "status",
+            "next_retry_at",
+            "created_at",
+        ),
+        Index("ix_agent_runs_expired_lease", "status", "lease_expires_at"),
+    )
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    session_id: Mapped[str] = mapped_column(
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=new_id
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("agent_sessions.id", ondelete="CASCADE"), index=True
     )
-    user_message_id: Mapped[str] = mapped_column(ForeignKey("messages.id"), unique=True)
-    assistant_message_id: Mapped[str | None] = mapped_column(ForeignKey("messages.id"), nullable=True)
+    user_message_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("messages.id"), unique=True
+    )
+    assistant_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("messages.id"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(32), default=RunStatus.PENDING.value, index=True)
-    output_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON_PAYLOAD, nullable=True
+    )
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    worker_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -100,10 +137,12 @@ class RunEvent(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(
+    run_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
     )
     sequence: Mapped[int] = mapped_column(Integer)
     event_type: Mapped[str] = mapped_column(String(80))
-    data_json: Mapped[str] = mapped_column(Text, default="{}")
+    data_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON_PAYLOAD, default=dict
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
