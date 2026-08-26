@@ -39,7 +39,35 @@ flowchart LR
 | `migrations/` | Alembic PostgreSQL Schema 迁移 |
 | `tests/` | 离线单元测试和 PostgreSQL 集成测试 |
 
-架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md) 和 [ADR 0004](docs/adr/0004-postgresql-worker-leases.md)。
+架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md) 和 [ADR 0005](docs/adr/0005-container-runtime-and-ci.md)。
+
+## Docker Compose 一键启动
+
+复制环境变量模板，在本机 `.env` 中填写密钥，然后构建并启动完整运行栈：
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --build --wait
+docker compose ps -a
+```
+
+Compose 使用同一个非 root 应用镜像承担三个角色，并按依赖顺序启动：
+
+| 服务 | 生命周期与职责 |
+| --- | --- |
+| `postgres` | 长期运行；持久化会话、任务和 SSE 事件 |
+| `migration` | 一次性运行；数据库健康后执行 `alembic upgrade head`，成功退出后才放行应用 |
+| `api` | 长期运行；提供 FastAPI、OpenAPI 和健康检查 |
+| `worker` | 长期运行；领取任务、续租、重试并写入进度事件 |
+
+访问 `http://127.0.0.1:8000/docs` 查看接口文档。排查启动过程时使用：
+
+```powershell
+docker compose logs migration
+docker compose logs -f api worker
+```
+
+`DATABASE_URL` 在宿主机仍使用 `localhost`；Compose 会为容器内的 API、Worker 和 migration 自动改用服务名 `postgres`。生产部署必须通过 Secret 管理注入密码和 API Key，不能沿用模板中的开发密码。
 
 ## 数据源
 
@@ -64,7 +92,7 @@ Copy-Item .env.example .env
 
 只在本机 `.env` 中填写密钥并修改数据库密码；`.env` 已被 Git 忽略，不得提交。`.env.example` 只能保留无效占位值。
 
-## 启动 PostgreSQL 与迁移
+## 只启动 PostgreSQL 与迁移
 
 使用项目自带的 Compose 服务：
 
@@ -145,6 +173,18 @@ uv run pytest -m postgres
 当前默认回归结果为 `21 passed, 1 skipped`；跳过项是未设置 `TEST_DATABASE_URL` 时的 PostgreSQL 集成测试。
 
 ![离线测试演示](docs/images/test-demo.svg)
+
+## 持续集成
+
+`.github/workflows/ci.yml` 在推送到 `main`、Pull Request 和手动触发时运行。GitHub Actions 会启动独立的 PostgreSQL 18 service container，并依次执行：
+
+1. 按 `uv.lock` 安装 Python 3.13 依赖；
+2. 执行 Alembic 升级并检查是否存在未生成的模型变更；
+3. 执行普通单元测试；
+4. 显式注入 `TEST_DATABASE_URL` 执行 PostgreSQL 集成测试；
+5. 构建生产应用镜像。
+
+因此本地未配置测试库时出现的一个 `skipped`，在 CI 中会真实执行。工作流只读取仓库内容；真实密钥应配置为 GitHub Actions Secret，不能写入 workflow 或 `.env.example`。
 
 ## 日志、编码与安全
 
