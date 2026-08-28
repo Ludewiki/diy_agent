@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
+from opentelemetry import trace
 
 from logging_config import configure_logging
 from weather_window import run_prompt
@@ -39,6 +40,11 @@ from .store import (
     read_events_after,
     request_cancellation,
     run_to_dict,
+)
+from .telemetry import (
+    current_trace_id,
+    record_http_request,
+    runtime as telemetry_runtime,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +75,7 @@ def _error_payload(
         "message": message,
         "details": details or {},
         "request_id": getattr(request.state, "request_id", None),
+        "trace_id": current_trace_id(),
     }
 
 
@@ -97,16 +104,26 @@ def create_app(
     runtime_database = database or Database(runtime_settings.database_url)
     if database is None:
         runtime_database.require_postgresql()
+    telemetry_runtime.configure(
+        runtime_settings,
+        service_role="api",
+        database=runtime_database,
+    )
+    telemetry_runtime.register_pending_runs_gauge(runtime_database)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         configure_logging()
         runtime_database.check_connection()
-        yield
+        try:
+            yield
+        finally:
+            telemetry_runtime.shutdown()
+            runtime_database.dispose()
 
     application = FastAPI(
         title="Weather-aware Travel Planner Agent API",
-        version="0.3.0",
+        version="0.4.0",
         description="PostgreSQL 会话、租约 Worker、重试与 SSE 进度事件。",
         lifespan=lifespan,
     )
@@ -119,6 +136,7 @@ def create_app(
         allow_credentials=True,
         allow_methods=["GET", "POST"],
         allow_headers=["Content-Type", "Last-Event-ID", "X-Request-ID"],
+        expose_headers=["X-Request-ID", "X-Trace-ID", "Server-Timing"],
     )
 
     @application.middleware("http")
@@ -126,14 +144,35 @@ def create_app(
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
         request.state.request_id = request_id
         started = time.perf_counter()
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        logger.info(
-            "http request completed",
-            extra={"event": "http_request", "request_id": request_id},
-        )
-        response.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - started) * 1000:.2f}"
-        return response
+        response = None
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            duration = time.perf_counter() - started
+            route_object = request.scope.get("route")
+            route = getattr(route_object, "path", request.url.path)
+            record_http_request(
+                duration,
+                method=request.method,
+                route=route,
+                status_code=status_code,
+            )
+            trace_id = current_trace_id()
+            if response is not None:
+                response.headers["X-Request-ID"] = request_id
+                if trace_id is not None:
+                    response.headers["X-Trace-ID"] = trace_id
+                response.headers["Server-Timing"] = f"app;dur={duration * 1000:.2f}"
+            current_span = trace.get_current_span()
+            if current_span.is_recording():
+                current_span.set_attribute("request.id", request_id)
+            logger.info(
+                "http request completed",
+                extra={"event": "http_request", "request_id": request_id},
+            )
 
     @application.exception_handler(ApiError)
     async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
@@ -168,20 +207,24 @@ def create_app(
         summary="同步执行 Agent（开发和演示用途）",
     )
     def invoke_agent(payload: InvokeRequest) -> InvokeResponse:
-        try:
-            result = _answer_dict(sync_runner(payload.prompt))
-        except RuntimeError as exc:
-            raise ApiError(503, "AGENT_UNAVAILABLE", str(exc)) from exc
-        except Exception as exc:
-            logger.error(
-                "synchronous agent invocation failed",
-                extra={"event": "run_failed", "error_code": "AGENT_EXECUTION_FAILED"},
-            )
-            raise ApiError(
-                502,
-                "AGENT_EXECUTION_FAILED",
-                "Agent 执行失败，请使用 X-Request-ID 查询服务日志。",
-            ) from exc
+        with telemetry_runtime.tracer.start_as_current_span(
+            "agent.invoke",
+            attributes={"agent.run.mode": "synchronous"},
+        ):
+            try:
+                result = _answer_dict(sync_runner(payload.prompt))
+            except RuntimeError as exc:
+                raise ApiError(503, "AGENT_UNAVAILABLE", str(exc)) from exc
+            except Exception as exc:
+                logger.error(
+                    "synchronous agent invocation failed",
+                    extra={"event": "run_failed", "error_code": "AGENT_EXECUTION_FAILED"},
+                )
+                raise ApiError(
+                    502,
+                    "AGENT_EXECUTION_FAILED",
+                    "Agent 执行失败，请使用 X-Request-ID 查询服务日志。",
+                ) from exc
         return InvokeResponse.model_validate(result)
 
     @application.post(
@@ -191,11 +234,15 @@ def create_app(
         tags=["sessions"],
     )
     def create_session(payload: SessionCreate) -> AgentSession:
-        with runtime_database.session_factory.begin() as session:
-            conversation = AgentSession(title=payload.title)
-            session.add(conversation)
-            session.flush()
-            return conversation
+        with telemetry_runtime.tracer.start_as_current_span(
+            "agent.session.create"
+        ) as span:
+            with runtime_database.session_factory.begin() as session:
+                conversation = AgentSession(title=payload.title)
+                session.add(conversation)
+                session.flush()
+                span.set_attribute("agent.session.id", str(conversation.id))
+                return conversation
 
     @application.get(
         "/v1/sessions/{session_id}",
@@ -238,12 +285,22 @@ def create_app(
         payload: MessageCreate,
         request: Request,
     ) -> QueuedRunResponse:
-        queued = enqueue_message(
-            runtime_database,
-            session_id,
-            payload.content,
-            max_attempts=runtime_settings.worker_max_attempts,
-        )
+        with telemetry_runtime.tracer.start_as_current_span(
+            "agent.session.load",
+            attributes={"agent.session.id": str(session_id)},
+        ):
+            with telemetry_runtime.tracer.start_as_current_span(
+                "agent.run.enqueue",
+                attributes={"agent.session.id": str(session_id)},
+            ) as span:
+                queued = enqueue_message(
+                    runtime_database,
+                    session_id,
+                    payload.content,
+                    max_attempts=runtime_settings.worker_max_attempts,
+                )
+                if queued is not None:
+                    span.set_attribute("agent.run.id", str(queued[1].id))
         if queued is None:
             raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在。")
         message, run = queued
@@ -331,6 +388,7 @@ def create_app(
             },
         )
 
+    telemetry_runtime.instrument_fastapi(application)
     return application
 
 

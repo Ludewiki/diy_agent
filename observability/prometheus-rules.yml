@@ -1,0 +1,13 @@
+groups:
+  - name: diy-agent-runtime
+    rules:
+      - record: diy_agent:api_latency_seconds:p50_5m
+        expr: histogram_quantile(0.50, sum by (le, http_route) (rate(agent_http_server_duration_seconds_bucket[5m])))
+      - record: diy_agent:api_latency_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum by (le, http_route) (rate(agent_http_server_duration_seconds_bucket[5m])))
+      - record: diy_agent:tool_success_ratio:5m
+        expr: sum(rate(agent_tool_calls_total{agent_tool_outcome="success"}[5m])) / clamp_min(sum(rate(agent_tool_calls_total[5m])), 1e-9)
+      - record: diy_agent:workers_active
+        expr: sum(agent_workers_active)
+      - record: diy_agent:runs_pending
+        expr: max(agent_runs_pending)

@@ -21,6 +21,10 @@ flowchart LR
     AGENT -->|结果与事件| PG
     PG -->|SSE 回放 / 断线续传| API
     API --> U
+    API --> OTEL[OpenTelemetry Collector]
+    WORKER --> OTEL
+    OTEL --> JAEGER[Jaeger Trace]
+    OTEL --> PROM[Prometheus Metrics]
 ```
 
 请求流程：创建 Session → 提交 Message → 创建 `PENDING` Run → Worker 领取并执行 → 持久化进度事件 → 前端通过 SSE 接收进度 → 查询最终 Run。
@@ -36,10 +40,13 @@ flowchart LR
 | `app/models.py` | SQLAlchemy Session、Message、Run、Event 模型 |
 | `app/store.py` | 事务、任务领取、租约、重试、取消和事件持久化 |
 | `app/worker.py` | 独立 Worker、租约心跳和 Agent 执行 |
+| `app/telemetry.py` | OpenTelemetry SDK、Trace 传播和业务 Metrics |
 | `migrations/` | Alembic PostgreSQL Schema 迁移 |
+| `observability/` | Collector、Prometheus 抓取与 recording rules |
+| `benchmarks/` | PostgreSQL 并发、Exactly-once 和租约回收基准 |
 | `tests/` | 离线单元测试和 PostgreSQL 集成测试 |
 
-架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md) 和 [ADR 0005](docs/adr/0005-container-runtime-and-ci.md)。
+架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md)、[ADR 0005](docs/adr/0005-container-runtime-and-ci.md) 和 [ADR 0006](docs/adr/0006-opentelemetry-and-runtime-benchmark.md)。
 
 ## Docker Compose 一键启动
 
@@ -59,6 +66,9 @@ Compose 使用同一个非 root 应用镜像承担三个角色，并按依赖顺
 | `migration` | 一次性运行；数据库健康后执行 `alembic upgrade head`，成功退出后才放行应用 |
 | `api` | 长期运行；提供 FastAPI、OpenAPI 和健康检查 |
 | `worker` | 长期运行；领取任务、续租、重试并写入进度事件 |
+| `otel-collector` | 接收 API/Worker 的 OTLP Trace 与 Metrics，并分别转发 |
+| `jaeger` | 存储和检索跨 API、Worker、LLM、Tool 与 PostgreSQL 的 Trace |
+| `prometheus` | 抓取 Metrics 并计算 P50/P95 与成功率 recording rules |
 
 访问 `http://127.0.0.1:8000/docs` 查看接口文档。排查启动过程时使用：
 
@@ -68,6 +78,53 @@ docker compose logs -f api worker
 ```
 
 `DATABASE_URL` 在宿主机仍使用 `localhost`；Compose 会为容器内的 API、Worker 和 migration 自动改用服务名 `postgres`。生产部署必须通过 Secret 管理注入密码和 API Key，不能沿用模板中的开发密码。
+
+## 可观测性
+
+OpenTelemetry Trace 使用 W3C Trace Context 穿过 HTTP，并把 carrier 持久化到 Run，因此 API 与 Worker 即使位于不同进程、不同时间执行，仍属于同一条 Trace：
+
+`HTTP request → Session → Run → PostgreSQL queue → Worker → LLM → Tool → PostgreSQL`
+
+API 响应包含 `X-Trace-ID`、`X-Request-ID` 和 `Server-Timing`。系统只记录模型名、Tool 名、状态、耗时和 Token 数，不把 prompt、Tool 参数、模型输出或密钥写入 Span/Metric。
+
+| 目标 | OpenTelemetry Metric / Prometheus recording rule |
+| --- | --- |
+| API P50/P95 | `agent.http.server.duration` / `diy_agent:api_latency_seconds:p50_5m`、`p95_5m` |
+| Run 排队/执行时间 | `agent.run.queue.duration`、`agent.run.execution.duration` |
+| Tool 成功率/耗时 | `agent.tool.calls`、`agent.tool.duration` / `diy_agent:tool_success_ratio:5m` |
+| 重试/租约回收 | `agent.run.retries`、`agent.run.lease_reclaims` |
+| LLM Token | `agent.llm.tokens`，按 input/output/total 区分 |
+| Worker/积压 | `agent.workers.active`、`agent.runs.pending` |
+
+本地入口：
+
+- FastAPI：`http://127.0.0.1:8000/docs`
+- Jaeger：`http://127.0.0.1:16686`
+- Prometheus：`http://127.0.0.1:9090`
+- Collector Prometheus exporter：`http://127.0.0.1:8889/metrics`
+
+开发环境默认全采样；生产环境应通过 `OTEL_TRACE_SAMPLE_RATIO` 降低采样率，并用 `OTEL_DEPLOYMENT_ENVIRONMENT` 标记环境。2～4 个 Worker 可用 `docker compose up -d --scale worker=4` 横向扩展。实现遵循 [OpenTelemetry Python instrumentation](https://opentelemetry.io/docs/languages/python/instrumentation/) 与 [exporter](https://opentelemetry.io/docs/languages/python/exporters/) 文档。
+
+## 量化并发基准
+
+基准脚本通过真实 HTTP、真实 PostgreSQL 事务、`FOR UPDATE SKIP LOCKED`、Worker 租约/心跳/fencing 执行；只把外部 LLM/Tool 替换为固定 20 ms 的本地 stub，避免网络波动和费用污染调度结果。脚本强制数据库名以 `_benchmark` 结尾，并会重建该数据库的 `public` Schema，绝不能指向开发库或生产库。
+
+```powershell
+docker compose exec postgres createdb -U diy_agent diy_agent_benchmark
+$env:BENCHMARK_DATABASE_URL="postgresql+psycopg://diy_agent:change-me-for-local-development@localhost:5432/diy_agent_benchmark"
+uv run python -m benchmarks.runtime_benchmark --worker-counts 2,4 --runs-per-scenario 100 --http-concurrency 16 --synthetic-delay-ms 20 --output docs/benchmarks/2026-08-27-runtime-benchmark.json
+```
+
+2026-08-27 本机实测环境为 Windows 11、Python 3.13.14、16 logical CPU、PostgreSQL 专用基准库。下面的数据来自该命令的实际结果，不是估算：
+
+| 场景 | 数量 | 吞吐量 | P50 | P95 |
+| --- | ---: | ---: | ---: | ---: |
+| `POST /v1/sessions` | 200 requests | 总体 API 178.042 req/s | 74.659 ms | 92.596 ms |
+| `POST /v1/sessions/{id}/messages` | 200 requests | 总体 API 178.042 req/s | 101.577 ms | 120.447 ms |
+| 2 Workers | 100 Runs | 31.179 Runs/s | 执行 54.942 ms | 执行 59.079 ms |
+| 4 Workers | 100 Runs | 52.521 Runs/s | 执行 63.989 ms | 执行 73.399 ms |
+
+2 Worker 的队列 P95 为 3050.368 ms，4 Worker 为 1812.681 ms；这里先一次性压入 100 个 Run，因此测到的是 burst backlog 的尾部等待时间。两组共 200 个正常 Run 均成功且每个 prompt 只执行一次，重复数为 0。中断场景中，任务租约过期后由另一 Worker 回收，`attempt_count=2`，真实 runner 只执行 1 次，旧 Worker 写回被 fencing 拒绝。完整机器可读结果见 [基准报告](docs/benchmarks/2026-08-27-runtime-benchmark.json)。
 
 ## 数据源
 
@@ -170,7 +227,7 @@ $env:TEST_DATABASE_URL="postgresql+psycopg://diy_agent:password@localhost:5432/d
 uv run pytest -m postgres
 ```
 
-当前默认回归结果为 `21 passed, 1 skipped`；跳过项是未设置 `TEST_DATABASE_URL` 时的 PostgreSQL 集成测试。
+当前默认回归结果为 `28 passed, 1 skipped`；跳过项是未设置 `TEST_DATABASE_URL` 时的 PostgreSQL 集成测试。
 
 ![离线测试演示](docs/images/test-demo.svg)
 
@@ -200,9 +257,9 @@ uv run pytest -m postgres
 - Wikivoyage 的全球覆盖和结构化程度不均，开放时间、票价和停业状态需出发前复核。
 - 路线暂不包含实时拥堵、公交班次、预约时段、无障碍和跨日行李约束。
 - PostgreSQL 目前同时承担持久化与任务分派；更大吞吐量下应评估 Redis、RabbitMQ 或托管任务队列。
-- 尚未实现身份认证、用户偏好表、暂停/恢复 checkpoint、OpenTelemetry、酒店/机票授权供应商适配和支付确认。
+- 尚未实现身份认证、用户偏好表、暂停/恢复 checkpoint、告警通知、酒店/机票授权供应商适配和支付确认。
 
-建议后续顺序：身份与用户偏好 → OpenTelemetry → 酒店只读推荐 → 授权票务沙箱与人工确认 → 飞书 Bot。
+建议后续顺序：身份与用户偏好 → 告警与 SLO → 酒店只读推荐 → 授权票务沙箱与人工确认 → 飞书 Bot。
 
 ## 提交前检查
 

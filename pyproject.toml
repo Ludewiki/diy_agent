@@ -1,6 +1,6 @@
 [project]
 name = "project-of-python"
-version = "0.3.0"
+version = "0.4.0"
 description = "Weather-aware multi-tool AI Agent for global travel itinerary planning"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -15,6 +15,13 @@ dependencies = [
     "langgraph>=1.2.9",
     "mwparserfromhell>=0.7.2",
     "openai>=2.45.0",
+    "opentelemetry-api>=1.39.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.39.0",
+    "opentelemetry-instrumentation-fastapi>=0.60b0",
+    "opentelemetry-instrumentation-httpx>=0.60b0",
+    "opentelemetry-instrumentation-requests>=0.60b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.60b0",
+    "opentelemetry-sdk>=1.39.0",
     "pydantic>=2",
     "psycopg[binary]>=3.2.0",
     "python-dotenv>=1.2.2",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
 import json
 from typing import Any
@@ -20,10 +21,23 @@ from .models import (
     RunStatus,
     utc_now,
 )
+from .telemetry import (
+    inject_trace_context,
+    record_run_claim,
+    record_run_retry,
+)
 
 
 class WorkerLeaseLost(RuntimeError):
     """Raised when a stale Worker tries to mutate a reclaimed Run."""
+
+
+@dataclass(frozen=True)
+class RunExecutionInput:
+    prompt: str
+    session_id: uuid.UUID
+    trace_context: dict[str, Any] | None
+    attempt_count: int
 
 
 def _lease_is_active(lease_expires_at: Any) -> bool:
@@ -33,6 +47,12 @@ def _lease_is_active(lease_expires_at: Any) -> bool:
     if getattr(lease_expires_at, "tzinfo", None) is None:
         now = now.replace(tzinfo=None)
     return bool(lease_expires_at > now)
+
+
+def _elapsed_seconds(started_at: Any, finished_at: Any) -> float:
+    if getattr(started_at, "tzinfo", None) is None:
+        finished_at = finished_at.replace(tzinfo=None)
+    return max(0.0, (finished_at - started_at).total_seconds())
 
 
 def decode_json(value: dict[str, Any] | str | None) -> dict[str, Any] | None:
@@ -145,6 +165,7 @@ def enqueue_message(
             session_id=session_id,
             user_message_id=message.id,
             max_attempts=max_attempts,
+            trace_context_json=inject_trace_context() or None,
         )
         session.add(run)
         session.flush()
@@ -237,6 +258,12 @@ def claim_next_run(
             return None
         reclaimed = run.status == RunStatus.RUNNING.value
         retrying = run.attempt_count > 0 and not reclaimed
+        first_claim = run.attempt_count == 0
+        queue_seconds = (
+            _elapsed_seconds(run.created_at, now)
+            if first_claim
+            else None
+        )
         run.status = RunStatus.RUNNING.value
         run.worker_id = worker_id
         run.heartbeat_at = now
@@ -264,6 +291,16 @@ def claim_next_run(
                 "lease_expires_at": run.lease_expires_at.isoformat(),
             },
             expected_worker_id=worker_id,
+        )
+        record_run_claim(
+            queue_seconds=queue_seconds,
+            claim_type=(
+                "reclaimed"
+                if reclaimed
+                else "retry"
+                if retrying
+                else "initial"
+            ),
         )
         return run.id
 
@@ -312,12 +349,27 @@ def worker_has_lease(
 
 
 def get_run_prompt(database: Database, run_id: uuid.UUID) -> str | None:
+    execution_input = get_run_execution_input(database, run_id)
+    return execution_input.prompt if execution_input is not None else None
+
+
+def get_run_execution_input(
+    database: Database,
+    run_id: uuid.UUID,
+) -> RunExecutionInput | None:
     with database.session_factory() as session:
         run = session.get(AgentRun, run_id)
         if run is None:
             return None
         message = session.get(Message, run.user_message_id)
-        return message.content if message is not None else None
+        if message is None:
+            return None
+        return RunExecutionInput(
+            prompt=message.content,
+            session_id=run.session_id,
+            trace_context=decode_json(run.trace_context_json),
+            attempt_count=run.attempt_count,
+        )
 
 
 def is_cancel_requested(database: Database, run_id: uuid.UUID) -> bool:
@@ -415,6 +467,7 @@ def fail_run(
             run.error_message = error_message
             run.next_retry_at = now + timedelta(seconds=retry_delay_seconds)
             event_type = "RUN_RETRY_SCHEDULED"
+            record_run_retry(error_code)
         else:
             run.status = RunStatus.FAILED.value
             run.error_code = error_code

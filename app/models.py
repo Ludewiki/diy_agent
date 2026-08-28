@@ -108,6 +108,9 @@ class AgentRun(Base):
     output_json: Mapped[dict[str, Any] | None] = mapped_column(
         JSON_PAYLOAD, nullable=True
     )
+    trace_context_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON_PAYLOAD, nullable=True
+    )
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)

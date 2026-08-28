@@ -14,6 +14,9 @@ from typing import Any, Callable, Sequence
 import uuid
 
 from dotenv import load_dotenv
+from opentelemetry import context as otel_context
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind, Status, StatusCode
 from pydantic import BaseModel
 
 from logging_config import configure_logging
@@ -26,8 +29,14 @@ from .store import (
     claim_next_run,
     complete_run,
     fail_run,
-    get_run_prompt,
+    get_run_execution_input,
     renew_lease,
+)
+from .telemetry import (
+    extract_trace_context,
+    record_run_execution,
+    runtime as telemetry_runtime,
+    set_worker_active,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,6 +63,7 @@ class LeaseHeartbeat:
         self.heartbeat_seconds = heartbeat_seconds
         self._stop = threading.Event()
         self.lost = threading.Event()
+        self._parent_context = otel_context.get_current()
         self._thread = threading.Thread(
             target=self._run,
             name=f"lease-heartbeat-{run_id}",
@@ -61,23 +71,27 @@ class LeaseHeartbeat:
         )
 
     def _run(self) -> None:
-        while not self._stop.wait(self.heartbeat_seconds):
-            try:
-                renewed = renew_lease(
-                    self.database,
-                    self.run_id,
-                    self.worker_id,
-                    self.lease_seconds,
-                )
-            except Exception:
-                logger.error(
-                    "worker heartbeat failed",
-                    extra={"event": "lease_heartbeat_failed", "request_id": str(self.run_id)},
-                )
-                continue
-            if not renewed:
-                self.lost.set()
-                return
+        token = otel_context.attach(self._parent_context)
+        try:
+            while not self._stop.wait(self.heartbeat_seconds):
+                try:
+                    renewed = renew_lease(
+                        self.database,
+                        self.run_id,
+                        self.worker_id,
+                        self.lease_seconds,
+                    )
+                except Exception:
+                    logger.error(
+                        "worker heartbeat failed",
+                        extra={"event": "lease_heartbeat_failed", "request_id": str(self.run_id)},
+                    )
+                    continue
+                if not renewed:
+                    self.lost.set()
+                    return
+        finally:
+            otel_context.detach(token)
 
     def __enter__(self) -> "LeaseHeartbeat":
         self._thread.start()
@@ -138,8 +152,8 @@ def execute_run(
     retry_delay_seconds: float,
     runner: Runner = run_prompt,
 ) -> None:
-    prompt = get_run_prompt(database, run_id)
-    if prompt is None:
+    execution_input = get_run_execution_input(database, run_id)
+    if execution_input is None:
         record_failure_if_owned(
             database,
             run_id,
@@ -151,47 +165,80 @@ def execute_run(
         )
         return
     callback = ProgressCallback(database, run_id, worker_id)
-    try:
-        with LeaseHeartbeat(
-            database,
-            run_id,
-            worker_id,
-            lease_seconds,
-            heartbeat_seconds,
-        ) as heartbeat:
-            answer = runner(prompt, callbacks=[callback])
-            if heartbeat.lost.is_set():
-                raise WorkerLeaseLost(f"Worker 已失去 Run {run_id} 的租约。")
-        complete_run(database, run_id, worker_id, normalize_answer(answer))
-    except RunCancelled as exc:
-        record_failure_if_owned(
-            database,
-            run_id,
-            worker_id,
-            "RUN_CANCELLED",
-            str(exc),
-            retryable=False,
-            retry_delay_seconds=retry_delay_seconds,
-        )
-    except WorkerLeaseLost:
-        logger.warning(
-            "worker lease lost; stale result discarded",
-            extra={"event": "worker_lease_lost", "request_id": str(run_id)},
-        )
-    except Exception:
-        logger.error(
-            "agent run failed",
-            extra={"event": "run_failed", "request_id": str(run_id), "error_code": "AGENT_EXECUTION_FAILED"},
-        )
-        record_failure_if_owned(
-            database,
-            run_id,
-            worker_id,
-            "AGENT_EXECUTION_FAILED",
-            "Agent 执行失败，请使用 run_id 查询服务日志。",
-            retryable=True,
-            retry_delay_seconds=retry_delay_seconds,
-        )
+    parent_context = extract_trace_context(execution_input.trace_context)
+    started = time.perf_counter()
+    outcome = "error"
+    with telemetry_runtime.tracer.start_as_current_span(
+        "agent.run.execute",
+        context=parent_context,
+        kind=SpanKind.CONSUMER,
+        attributes={
+            "agent.run.id": str(run_id),
+            "agent.session.id": str(execution_input.session_id),
+            "agent.run.attempt": execution_input.attempt_count,
+            "worker.id": worker_id,
+        },
+    ) as span:
+        try:
+            with LeaseHeartbeat(
+                database,
+                run_id,
+                worker_id,
+                lease_seconds,
+                heartbeat_seconds,
+            ) as heartbeat:
+                answer = runner(
+                    execution_input.prompt,
+                    callbacks=[callback],
+                )
+                if heartbeat.lost.is_set():
+                    raise WorkerLeaseLost(f"Worker 已失去 Run {run_id} 的租约。")
+            complete_run(database, run_id, worker_id, normalize_answer(answer))
+            outcome = "success"
+        except RunCancelled as exc:
+            outcome = "cancelled"
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            record_failure_if_owned(
+                database,
+                run_id,
+                worker_id,
+                "RUN_CANCELLED",
+                str(exc),
+                retryable=False,
+                retry_delay_seconds=retry_delay_seconds,
+            )
+        except WorkerLeaseLost as exc:
+            outcome = "lease_lost"
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            logger.warning(
+                "worker lease lost; stale result discarded",
+                extra={"event": "worker_lease_lost", "request_id": str(run_id)},
+            )
+        except Exception as exc:
+            outcome = "error"
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            logger.error(
+                "agent run failed",
+                extra={"event": "run_failed", "request_id": str(run_id), "error_code": "AGENT_EXECUTION_FAILED"},
+            )
+            record_failure_if_owned(
+                database,
+                run_id,
+                worker_id,
+                "AGENT_EXECUTION_FAILED",
+                "Agent 执行失败，请使用 run_id 查询服务日志。",
+                retryable=True,
+                retry_delay_seconds=retry_delay_seconds,
+            )
+        finally:
+            span.set_attribute("agent.run.outcome", outcome)
+            record_run_execution(
+                time.perf_counter() - started,
+                outcome=outcome,
+            )
 
 
 def run_once(
@@ -204,7 +251,14 @@ def run_once(
     retry_delay_seconds: float = 5.0,
 ) -> uuid.UUID | None:
     resolved_worker_id = worker_id or create_worker_id()
-    run_id = claim_next_run(database, resolved_worker_id, lease_seconds)
+    with telemetry_runtime.tracer.start_as_current_span(
+        "worker.claim",
+        kind=SpanKind.CONSUMER,
+        attributes={"worker.id": resolved_worker_id},
+    ) as span:
+        run_id = claim_next_run(database, resolved_worker_id, lease_seconds)
+        if run_id is not None:
+            span.set_attribute("agent.run.id", str(run_id))
     if run_id is None:
         return None
     execute_run(
@@ -240,18 +294,22 @@ def serve(
         "worker started",
         extra={"event": "worker_started", "request_id": worker_id},
     )
-    while not stopping:
-        claimed = run_once(
-            database,
-            runner,
-            worker_id=worker_id,
-            lease_seconds=settings.worker_lease_seconds,
-            heartbeat_seconds=settings.worker_heartbeat_seconds,
-            retry_delay_seconds=settings.worker_retry_delay_seconds,
-        )
-        if claimed is None:
-            time.sleep(settings.worker_poll_seconds)
-    logger.info("worker stopped", extra={"event": "worker_stopped"})
+    set_worker_active(True)
+    try:
+        while not stopping:
+            claimed = run_once(
+                database,
+                runner,
+                worker_id=worker_id,
+                lease_seconds=settings.worker_lease_seconds,
+                heartbeat_seconds=settings.worker_heartbeat_seconds,
+                retry_delay_seconds=settings.worker_retry_delay_seconds,
+            )
+            if claimed is None:
+                time.sleep(settings.worker_poll_seconds)
+    finally:
+        set_worker_active(False)
+        logger.info("worker stopped", extra={"event": "worker_stopped"})
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -265,17 +323,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     settings.validate()
     database = Database(settings.database_url)
     database.require_postgresql()
+    telemetry_runtime.configure(
+        settings,
+        service_role="worker",
+        database=database,
+    )
     database.check_connection()
-    if args.once:
-        run_once(
-            database,
-            worker_id=create_worker_id(),
-            lease_seconds=settings.worker_lease_seconds,
-            heartbeat_seconds=settings.worker_heartbeat_seconds,
-            retry_delay_seconds=settings.worker_retry_delay_seconds,
-        )
-    else:
-        serve(database, settings)
+    try:
+        if args.once:
+            run_once(
+                database,
+                worker_id=create_worker_id(),
+                lease_seconds=settings.worker_lease_seconds,
+                heartbeat_seconds=settings.worker_heartbeat_seconds,
+                retry_delay_seconds=settings.worker_retry_delay_seconds,
+            )
+        else:
+            serve(database, settings)
+    finally:
+        telemetry_runtime.shutdown()
+        database.dispose()
     return 0
 
 

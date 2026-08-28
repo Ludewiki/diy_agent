@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-08-27T14:39:53.404277+00:00",
+  "environment": {
+    "host": "local-machine",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.13.14",
+    "cpu_count": 16,
+    "database": "PostgreSQL dedicated _benchmark database"
+  },
+  "configuration": {
+    "worker_counts": [
+      2,
+      4
+    ],
+    "runs_per_scenario": 100,
+    "http_concurrency": 16,
+    "synthetic_runner_delay_ms": 20.0,
+    "runner": "deterministic local stub; no external LLM or Tool network"
+  },
+  "api": {
+    "total_requests": 400,
+    "wall_time_seconds": 2.246662,
+    "throughput_requests_per_second": 178.042,
+    "endpoints": {
+      "POST /v1/sessions": {
+        "requests": 200,
+        "p50_ms": 74.659,
+        "p95_ms": 92.596
+      },
+      "POST /v1/sessions/{id}/messages": {
+        "requests": 200,
+        "p50_ms": 101.577,
+        "p95_ms": 120.447
+      }
+    }
+  },
+  "workers": [
+    {
+      "worker_count": 2,
+      "runs": 100,
+      "wall_time_seconds": 3.20732,
+      "throughput_runs_per_second": 31.179,
+      "queue_latency_ms": {
+        "p50": 2067.103,
+        "p95": 3050.368
+      },
+      "execution_latency_ms": {
+        "p50": 54.942,
+        "p95": 59.079
+      },
+      "all_succeeded": true,
+      "exactly_once": true,
+      "duplicate_prompt_count": 0
+    },
+    {
+      "worker_count": 4,
+      "runs": 100,
+      "wall_time_seconds": 1.903995,
+      "throughput_runs_per_second": 52.521,
+      "queue_latency_ms": {
+        "p50": 1422.999,
+        "p95": 1812.681
+      },
+      "execution_latency_ms": {
+        "p50": 63.989,
+        "p95": 73.399
+      },
+      "all_succeeded": true,
+      "exactly_once": true,
+      "duplicate_prompt_count": 0
+    }
+  ],
+  "crash_recovery": {
+    "recovered_by_other_worker": true,
+    "final_status": "SUCCEEDED",
+    "attempt_count": 2,
+    "runner_execution_count": 1,
+    "stale_worker_fenced": true,
+    "passed": true
+  },
+  "invariants": {
+    "all_normal_runs_succeeded": true,
+    "normal_runs_executed_exactly_once": true,
+    "no_duplicate_normal_prompts": true,
+    "crashed_run_recovered": true
+  },
+  "diagnostics": {
+    "duplicate_normal_prompt_count": 0
+  }
+}
