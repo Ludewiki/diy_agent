@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.callbacks import extract_token_usage, tool_outcome
+from app.callbacks import build_tool_snapshot, extract_token_usage, tool_outcome
 from benchmarks.runtime_benchmark import nearest_rank_percentile
 
 
@@ -53,3 +53,27 @@ def test_nearest_rank_percentile_is_deterministic() -> None:
     values = [0.001, 0.002, 0.003, 0.004, 0.005]
     assert nearest_rank_percentile(values, 0.50) == 0.003
     assert nearest_rank_percentile(values, 0.95) == 0.005
+
+
+def test_weather_tool_snapshot_uses_an_explicit_allowlist() -> None:
+    snapshot = build_tool_snapshot(
+        "find_best_weather_window",
+        {
+            "status": "ok",
+            "query_city": "上海",
+            "top_windows": [{"average_score": 90}],
+            "internal_secret": "not-for-the-browser",
+        },
+    )
+    assert snapshot == {
+        "status": "ok",
+        "query_city": "上海",
+        "top_windows": [{"average_score": 90}],
+    }
+
+
+def test_unknown_tool_does_not_expose_its_output() -> None:
+    assert build_tool_snapshot(
+        "untrusted_tool",
+        {"status": "ok", "payload": "private"},
+    ) is None

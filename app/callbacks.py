@@ -9,6 +9,7 @@ from typing import Any
 import uuid
 
 from langchain_core.callbacks import BaseCallbackHandler
+from pydantic import BaseModel
 from opentelemetry import context, trace
 from opentelemetry.trace import Status, StatusCode
 
@@ -97,6 +98,59 @@ def tool_outcome(output: Any) -> str:
     if isinstance(value, dict) and str(value.get("status", "")).lower() == "error":
         return "error"
     return "success"
+
+
+def _tool_result_object(output: Any) -> dict[str, Any] | None:
+    value = output.content if hasattr(output, "content") else output
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    return value if isinstance(value, dict) else None
+
+
+def build_tool_snapshot(name: str, output: Any) -> dict[str, Any] | None:
+    """Expose only product-safe fields needed by the Web progress view."""
+    result = _tool_result_object(output)
+    if result is None:
+        return None
+    if result.get("status") == "error":
+        return {
+            key: result[key]
+            for key in ("status", "error_code", "message")
+            if key in result
+        }
+    allowed_fields = {
+        "find_best_weather_window": (
+            "status",
+            "query_city",
+            "resolved_location",
+            "trip_days",
+            "best_window",
+            "all_daily_weather",
+            "top_windows",
+            "skipped_dates",
+            "source",
+            "notice",
+        ),
+        "plan_wikivoyage_trip": (
+            "status",
+            "city",
+            "trip_days",
+            "map_profile",
+            "itinerary",
+            "source_pages",
+            "attribution",
+            "warnings",
+        ),
+    }
+    fields = allowed_fields.get(name)
+    if fields is None:
+        return None
+    return {key: result[key] for key in fields if key in result}
 
 
 def _model_name(serialized: dict[str, Any], kwargs: dict[str, Any]) -> str:
@@ -303,8 +357,12 @@ class ProgressCallback(BaseCallbackHandler):
         name = state.name if state is not None else "unknown_tool"
         outcome = tool_outcome(output)
         event_type = "TOOL_SUCCEEDED" if outcome == "success" else "TOOL_FAILED"
+        event_data: dict[str, Any] = {"tool_name": name}
+        snapshot = build_tool_snapshot(name, output)
+        if snapshot is not None:
+            event_data["result"] = snapshot
         try:
-            self._append(event_type, {"tool_name": name})
+            self._append(event_type, event_data)
         finally:
             if state is not None:
                 error = (

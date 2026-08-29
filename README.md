@@ -2,7 +2,7 @@
 
 面向全球城市的多工具旅行规划 Agent。系统先从近期预报中选择连续天气窗口，再从 Wikivoyage 提取景点，结合用户兴趣评分、OpenRouteService（ORS）交通矩阵、容量约束聚类和路径算法生成多日路线。
 
-当前工程同时提供同步演示接口和可恢复的异步执行链路：FastAPI 接收请求，PostgreSQL 持久化 Session、Message、Run 与 SSE Event，独立 Worker 使用数据库租约领取任务、续租、失败重试，并阻止失去租约的旧 Worker 写回结果。
+当前工程提供可直接操作的 Web 产品页、同步演示接口和可恢复的异步执行链路：FastAPI 接收请求，PostgreSQL 持久化 Session、Message、Run 与 SSE Event，独立 Worker 使用数据库租约领取任务、续租、失败重试，并阻止失去租约的旧 Worker 写回结果。
 
 ## 架构
 
@@ -29,6 +29,20 @@ flowchart LR
 
 请求流程：创建 Session → 提交 Message → 创建 `PENDING` Run → Worker 领取并执行 → 持久化进度事件 → 前端通过 SSE 接收进度 → 查询最终 Run。
 
+## Web 产品入口
+
+启动 Compose 后访问 `http://127.0.0.1:8000/`。页面不需要 Node 或前端构建工具，由 FastAPI 同源托管原生 HTML/CSS/JavaScript，提供：
+
+- 城市、旅行天数、兴趣、预算和补充偏好输入；
+- 天气 Tool 返回后实时展示前三个连续候选日期；
+- 使用持久化 SSE Event 展示 Run、Agent 和 Tool 进度，断线后由服务端回放；
+- Leaflet + OpenStreetMap 展示每日景点顺序，无外网或 Leaflet 不可用时降级到原生 SVG 坐标路线；
+- 展示 Wikivoyage 来源、Open-Meteo/ORS 使用状态、风险提示与最终 Agent 行程。
+
+Tool 输出不会原样推送到浏览器。后端只对白名单字段生成展示快照，未知 Tool 默认不暴露任何结果；动态上游文本使用 DOM `textContent` 渲染，不作为 HTML 注入。
+
+![Web 产品入口](docs/images/web-product.png)
+
 ## 主要目录
 
 | 路径 | 职责 |
@@ -41,12 +55,13 @@ flowchart LR
 | `app/store.py` | 事务、任务领取、租约、重试、取消和事件持久化 |
 | `app/worker.py` | 独立 Worker、租约心跳和 Agent 执行 |
 | `app/telemetry.py` | OpenTelemetry SDK、Trace 传播和业务 Metrics |
+| `app/web/` | 无构建 Web 页面、响应式视觉、SSE 和地图交互 |
 | `migrations/` | Alembic PostgreSQL Schema 迁移 |
 | `observability/` | Collector、Prometheus 抓取与 recording rules |
 | `benchmarks/` | PostgreSQL 并发、Exactly-once 和租约回收基准 |
 | `tests/` | 离线单元测试和 PostgreSQL 集成测试 |
 
-架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md)、[ADR 0005](docs/adr/0005-container-runtime-and-ci.md) 和 [ADR 0006](docs/adr/0006-opentelemetry-and-runtime-benchmark.md)。
+架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md)、[ADR 0005](docs/adr/0005-container-runtime-and-ci.md)、[ADR 0006](docs/adr/0006-opentelemetry-and-runtime-benchmark.md) 和 [ADR 0007](docs/adr/0007-web-product-entry.md)。
 
 ## Docker Compose 一键启动
 
@@ -70,7 +85,7 @@ Compose 使用同一个非 root 应用镜像承担三个角色，并按依赖顺
 | `jaeger` | 存储和检索跨 API、Worker、LLM、Tool 与 PostgreSQL 的 Trace |
 | `prometheus` | 抓取 Metrics 并计算 P50/P95 与成功率 recording rules |
 
-访问 `http://127.0.0.1:8000/docs` 查看接口文档。排查启动过程时使用：
+访问 `http://127.0.0.1:8000/` 使用产品页面，访问 `http://127.0.0.1:8000/docs` 查看接口文档。排查启动过程时使用：
 
 ```powershell
 docker compose logs migration
@@ -227,7 +242,7 @@ $env:TEST_DATABASE_URL="postgresql+psycopg://diy_agent:password@localhost:5432/d
 uv run pytest -m postgres
 ```
 
-当前默认回归结果为 `28 passed, 1 skipped`；跳过项是未设置 `TEST_DATABASE_URL` 时的 PostgreSQL 集成测试。
+当前默认回归结果为 `31 passed, 1 skipped`；跳过项是未设置 `TEST_DATABASE_URL` 时的 PostgreSQL 集成测试。
 
 ![离线测试演示](docs/images/test-demo.svg)
 

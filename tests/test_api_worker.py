@@ -58,6 +58,21 @@ def test_synchronous_agent_endpoint(client: TestClient) -> None:
     assert response.headers["X-Request-ID"]
 
 
+def test_product_page_and_assets_are_served(client: TestClient) -> None:
+    page = client.get("/")
+    assert page.status_code == 200
+    assert 'id="planner-form"' in page.text
+    assert 'id="weather-candidates"' in page.text
+    assert 'id="map"' in page.text
+    script = client.get("/static/app.js")
+    assert script.status_code == 200
+    assert "new EventSource" in script.text
+    assert "renderMapDay" in script.text
+    styles = client.get("/static/styles.css")
+    assert styles.status_code == 200
+    assert ".planner-card" in styles.text
+
+
 def test_session_message_and_pending_run(client: TestClient) -> None:
     session_id, run_id = _create_queued_run(client)
     run = client.get(f"/v1/runs/{run_id}").json()
@@ -80,7 +95,26 @@ def test_worker_executes_run_and_sse_replays_events(
                 "{}",
                 run_id=tool_run_id,
             )
-            callback.on_tool_end({"status": "ok"}, run_id=tool_run_id)
+            callback.on_tool_end(
+                {
+                    "status": "ok",
+                    "query_city": "上海",
+                    "top_windows": [
+                        {
+                            "start_date": "2026-08-28",
+                            "end_date": "2026-08-30",
+                            "average_score": 88.0,
+                            "dates": [
+                                "2026-08-28",
+                                "2026-08-29",
+                                "2026-08-30",
+                            ],
+                        }
+                    ],
+                    "internal_secret": "must-not-reach-sse",
+                },
+                run_id=tool_run_id,
+            )
         return {"answer": f"异步回答：{prompt}", "reference": []}
 
     assert str(run_once(database, fake_runner)) == run_id
@@ -96,6 +130,8 @@ def test_worker_executes_run_and_sse_replays_events(
     assert "event: RUN_STARTED" in stream.text
     assert "event: TOOL_STARTED" in stream.text
     assert "event: TOOL_SUCCEEDED" in stream.text
+    assert '"top_windows"' in stream.text
+    assert "must-not-reach-sse" not in stream.text
     assert "event: RUN_SUCCEEDED" in stream.text
 
     resumed = client.get(

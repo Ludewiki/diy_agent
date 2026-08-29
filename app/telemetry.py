@@ -88,7 +88,7 @@ class TelemetryRuntime:
         resource = Resource.create(
             {
                 "service.name": service_name,
-                "service.version": "0.4.0",
+                "service.version": "0.5.0",
                 "service.instance.id": str(uuid.uuid4()),
                 "deployment.environment.name": (
                     settings.otel_deployment_environment
@@ -159,8 +159,8 @@ class TelemetryRuntime:
         metrics.set_meter_provider(meter_provider)
         self.tracer_provider = tracer_provider
         self.meter_provider = meter_provider
-        self.tracer = trace.get_tracer("diy-agent.runtime", "0.4.0")
-        meter = metrics.get_meter("diy-agent.runtime", "0.4.0")
+        self.tracer = trace.get_tracer("diy-agent.runtime", "0.5.0")
+        meter = metrics.get_meter("diy-agent.runtime", "0.5.0")
         self.instruments = Instruments(
             http_duration=meter.create_histogram(
                 "agent.http.server.duration",
@@ -288,7 +288,7 @@ class TelemetryRuntime:
                     extra={"event": "telemetry_gauge_failed"},
                 )
 
-        meter = metrics.get_meter("diy-agent.runtime", "0.4.0")
+        meter = metrics.get_meter("diy-agent.runtime", "0.5.0")
         meter.create_observable_gauge(
             "agent.runs.pending",
             callbacks=[observe_pending_runs],

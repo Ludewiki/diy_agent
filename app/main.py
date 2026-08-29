@@ -9,11 +9,13 @@ import logging
 import time
 from typing import Any, AsyncIterator, Callable
 import uuid
+from pathlib import Path
 
 from fastapi import FastAPI, Header, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import select
 from opentelemetry import trace
@@ -49,6 +51,7 @@ from .telemetry import (
 
 logger = logging.getLogger(__name__)
 SyncRunner = Callable[..., Any]
+WEB_DIRECTORY = Path(__file__).resolve().parent / "web"
 
 
 def _answer_dict(answer: Any) -> dict[str, Any]:
@@ -123,8 +126,8 @@ def create_app(
 
     application = FastAPI(
         title="Weather-aware Travel Planner Agent API",
-        version="0.4.0",
-        description="PostgreSQL 会话、租约 Worker、重试与 SSE 进度事件。",
+        version="0.5.0",
+        description="Web 产品入口、PostgreSQL 会话、租约 Worker、重试与 SSE 进度事件。",
         lifespan=lifespan,
     )
     application.state.database = runtime_database
@@ -137,6 +140,11 @@ def create_app(
         allow_methods=["GET", "POST"],
         allow_headers=["Content-Type", "Last-Event-ID", "X-Request-ID"],
         expose_headers=["X-Request-ID", "X-Trace-ID", "Server-Timing"],
+    )
+    application.mount(
+        "/static",
+        StaticFiles(directory=WEB_DIRECTORY),
+        name="static",
     )
 
     @application.middleware("http")
@@ -199,6 +207,10 @@ def create_app(
     def health() -> HealthResponse:
         runtime_database.check_connection()
         return HealthResponse(status="ok", database="reachable")
+
+    @application.get("/", include_in_schema=False)
+    def product_page() -> FileResponse:
+        return FileResponse(WEB_DIRECTORY / "index.html")
 
     @application.post(
         "/v1/agent/invoke",

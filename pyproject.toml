@@ -1,6 +1,6 @@
 [project]
 name = "project-of-python"
-version = "0.4.0"
+version = "0.5.0"
 description = "Weather-aware multi-tool AI Agent for global travel itinerary planning"
 readme = "README.md"
 requires-python = ">=3.13"
