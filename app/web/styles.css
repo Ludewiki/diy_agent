@@ -760,6 +760,41 @@ footer {
   background: var(--forest);
 }
 
+.context-budget {
+  display: grid;
+  gap: 11px;
+  margin: 2px 0 18px;
+  padding: 14px 15px;
+  border: 1px solid rgba(22, 79, 66, 0.12);
+  border-radius: 12px;
+  background: rgba(224, 239, 231, 0.44);
+}
+
+.context-budget > div:first-child {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.context-budget span {
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.09em;
+}
+
+.context-budget strong {
+  color: var(--forest);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.context-budget-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .trace-box {
   display: grid;
   gap: 6px;

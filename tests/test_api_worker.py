@@ -87,7 +87,8 @@ def test_worker_executes_run_and_sse_replays_events(
 ) -> None:
     session_id, run_id = _create_queued_run(client)
 
-    def fake_runner(prompt: str, *, callbacks) -> dict:
+    def fake_runner(prompt: str, *, callbacks, context) -> dict:
+        assert context.usage.history_messages_used == 0
         tool_run_id = uuid.uuid4()
         for callback in callbacks:
             callback.on_tool_start(
@@ -128,6 +129,7 @@ def test_worker_executes_run_and_sse_replays_events(
     assert stream.status_code == 200
     assert "event: RUN_QUEUED" in stream.text
     assert "event: RUN_STARTED" in stream.text
+    assert "event: CONTEXT_PREPARED" in stream.text
     assert "event: TOOL_STARTED" in stream.text
     assert "event: TOOL_SUCCEEDED" in stream.text
     assert '"top_windows"' in stream.text
@@ -148,6 +150,65 @@ def test_pending_run_can_be_cancelled(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "CANCELLED"
     assert response.json()["cancel_requested"] is True
+
+
+def test_worker_passes_previous_turns_to_follow_up_run(
+    client: TestClient,
+    database: Database,
+) -> None:
+    session_id, first_run_id = _create_queued_run(client)
+    captured_contexts = []
+
+    def capturing_runner(prompt: str, *, callbacks, context) -> dict:
+        captured_contexts.append(context)
+        return {"answer": f"回答：{prompt}", "reference": []}
+
+    assert str(run_once(database, capturing_runner)) == first_run_id
+    follow_up = client.post(
+        f"/v1/sessions/{session_id}/messages",
+        json={"content": "把行程改得更轻松一些"},
+    )
+    assert follow_up.status_code == 202
+    second_run_id = follow_up.json()["run"]["id"]
+    assert str(run_once(database, capturing_runner)) == second_run_id
+
+    assert captured_contexts[0].history == ()
+    assert [message.role for message in captured_contexts[1].history] == [
+        "USER",
+        "ASSISTANT",
+    ]
+    assert [message.content for message in captured_contexts[1].history] == [
+        "帮我规划近期去上海三天",
+        "回答：帮我规划近期去上海三天",
+    ]
+
+
+def test_tool_invocation_limit_fails_without_retry(
+    client: TestClient,
+    database: Database,
+) -> None:
+    _, run_id = _create_queued_run(client)
+
+    def excessive_runner(prompt: str, *, callbacks, context) -> dict:
+        callback = callbacks[0]
+        first_id = uuid.uuid4()
+        callback.on_tool_start({"name": "first_tool"}, "{}", run_id=first_id)
+        callback.on_tool_end({"status": "ok"}, run_id=first_id)
+        callback.on_tool_start(
+            {"name": "second_tool"},
+            "{}",
+            run_id=uuid.uuid4(),
+        )
+        return {"answer": prompt, "reference": []}
+
+    assert str(run_once(database, excessive_runner, max_tool_calls=1)) == run_id
+    run = client.get(f"/v1/runs/{run_id}").json()
+    assert run["status"] == "FAILED"
+    assert run["error_code"] == "AGENT_INVOCATION_LIMIT_EXCEEDED"
+    assert run["attempt_count"] == 1
+    events = client.get(f"/v1/runs/{run_id}/events").text
+    assert "event: CONTEXT_LIMIT_REACHED" in events
+    assert "event: RUN_RETRY_SCHEDULED" not in events
 
 
 def test_api_errors_use_stable_contract(client: TestClient) -> None:

@@ -197,7 +197,12 @@ def _run_workers(
     execution_lock = threading.Lock()
     callback_tool_ids: dict[str, uuid.UUID] = {}
 
-    def synthetic_runner(prompt: str, *, callbacks: list[Any]) -> dict[str, Any]:
+    def synthetic_runner(
+        prompt: str,
+        *,
+        callbacks: list[Any],
+        context: Any,
+    ) -> dict[str, Any]:
         with execution_lock:
             execution_counts[prompt] += 1
         tool_id = uuid.uuid4()
@@ -332,7 +337,12 @@ def _verify_crash_recovery(
 
     executions = 0
 
-    def recovery_runner(prompt: str, *, callbacks: list[Any]) -> dict[str, Any]:
+    def recovery_runner(
+        prompt: str,
+        *,
+        callbacks: list[Any],
+        context: Any,
+    ) -> dict[str, Any]:
         nonlocal executions
         executions += 1
         return {"answer": f"recovered:{prompt}", "reference": []}

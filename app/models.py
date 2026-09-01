@@ -62,6 +62,15 @@ class AgentSession(Base):
     )
     title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default=SessionStatus.ACTIVE.value, index=True)
+    summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary_through_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    summary_message_count: Mapped[int] = mapped_column(Integer, default=0)
+    summary_token_count: Mapped[int] = mapped_column(Integer, default=0)
+    summary_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 

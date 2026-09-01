@@ -27,6 +27,13 @@ class RunCancelled(RuntimeError):
     pass
 
 
+class RunInvocationLimitExceeded(RuntimeError):
+    def __init__(self, kind: str, limit: int) -> None:
+        self.kind = kind
+        self.limit = limit
+        super().__init__(f"{kind} 调用次数已达到本次 Run 的上限 {limit}。")
+
+
 @dataclass
 class _SpanState:
     span: trace.Span
@@ -176,6 +183,9 @@ class ProgressCallback(BaseCallbackHandler):
         database: Database,
         agent_run_id: uuid.UUID,
         worker_id: str,
+        *,
+        max_llm_calls: int = 6,
+        max_tool_calls: int = 4,
     ) -> None:
         self.database = database
         self.agent_run_id = agent_run_id
@@ -183,6 +193,33 @@ class ProgressCallback(BaseCallbackHandler):
         self._tools: dict[str, _SpanState] = {}
         self._models: dict[str, _SpanState] = {}
         self._thinking_emitted = False
+        self.max_llm_calls = max_llm_calls
+        self.max_tool_calls = max_tool_calls
+        self.llm_call_count = 0
+        self.tool_call_count = 0
+
+    def _reserve_invocation(self, kind: str) -> None:
+        if kind == "LLM":
+            count = self.llm_call_count
+            limit = self.max_llm_calls
+        else:
+            count = self.tool_call_count
+            limit = self.max_tool_calls
+        if count >= limit:
+            self._append(
+                "CONTEXT_LIMIT_REACHED",
+                {
+                    "limit_type": kind,
+                    "limit": limit,
+                    "llm_call_count": self.llm_call_count,
+                    "tool_call_count": self.tool_call_count,
+                },
+            )
+            raise RunInvocationLimitExceeded(kind, limit)
+        if kind == "LLM":
+            self.llm_call_count += 1
+        else:
+            self.tool_call_count += 1
 
     def _check_cancelled(self) -> None:
         if is_cancel_requested(self.database, self.agent_run_id):
@@ -243,6 +280,7 @@ class ProgressCallback(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         self._check_cancelled()
+        self._reserve_invocation("LLM")
         model = _model_name(serialized, kwargs)
         state = self._start_span(
             "agent.llm.call",
@@ -327,6 +365,7 @@ class ProgressCallback(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         self._check_cancelled()
+        self._reserve_invocation("TOOL")
         name = str(serialized.get("name") or "unknown_tool")
         state = self._start_span(
             f"agent.tool.{name}",

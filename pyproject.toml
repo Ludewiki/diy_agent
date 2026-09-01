@@ -1,6 +1,6 @@
 [project]
 name = "project-of-python"
-version = "0.5.0"
+version = "0.6.0"
 description = "Weather-aware multi-tool AI Agent for global travel itinerary planning"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -27,6 +27,7 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "requests>=2.34.2",
     "sqlalchemy>=2.0.51",
+    "tiktoken>=0.11.0",
     "uvicorn[standard]>=0.35.0",
 ]
 

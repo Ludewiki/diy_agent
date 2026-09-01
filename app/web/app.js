@@ -92,6 +92,9 @@
       node.classList.remove("is-active", "is-done");
       node.querySelector("span").textContent = details[node.dataset.stage];
     });
+    $("#context-tokens").textContent = "0 / 12,000 tokens";
+    $("#context-history").textContent = "历史 0 条";
+    $("#context-summary").textContent = "摘要未使用";
   }
 
   function showError(message) {
@@ -249,6 +252,8 @@
       "RUN_STARTED",
       "RUN_RECLAIMED",
       "RUN_RETRY_STARTED",
+      "CONTEXT_PREPARED",
+      "CONTEXT_LIMIT_REACHED",
       "AGENT_THINKING",
       "TOOL_STARTED",
       "TOOL_SUCCEEDED",
@@ -283,6 +288,21 @@
     } else if (["RUN_STARTED", "RUN_RECLAIMED", "RUN_RETRY_STARTED"].includes(type)) {
       setStage("queued", "done", type === "RUN_RECLAIMED" ? "任务已由其他 Worker 回收" : "Worker 已领取");
       setStage("weather", "active", "Agent 正在选择工具");
+    } else if (type === "CONTEXT_PREPARED") {
+      const used = Number(data.estimated_input_tokens || 0).toLocaleString("zh-CN");
+      const limit = Number(data.max_input_tokens || 0).toLocaleString("zh-CN");
+      $("#context-tokens").textContent = used + " / " + limit + " tokens";
+      $("#context-history").textContent = "历史 " + Number(data.history_messages_used || 0) + " 条";
+      $("#context-summary").textContent = data.summary_present
+        ? (data.summary_updated ? "摘要已更新" : "摘要已复用")
+        : "摘要未使用";
+      if (data.over_budget) {
+        addWarning("当前问题与最近上下文超过估算预算；Agent 已优先保留当前问题和最近一轮。");
+      }
+    } else if (type === "CONTEXT_LIMIT_REACHED") {
+      addWarning(
+        String(data.limit_type || "Agent") + " 调用已达到本次 Run 的安全上限。"
+      );
     } else if (type === "TOOL_STARTED") {
       handleToolStarted(data.tool_name);
     } else if (type === "TOOL_SUCCEEDED") {

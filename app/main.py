@@ -126,7 +126,7 @@ def create_app(
 
     application = FastAPI(
         title="Weather-aware Travel Planner Agent API",
-        version="0.5.0",
+        version="0.6.0",
         description="Web 产品入口、PostgreSQL 会话、租约 Worker、重试与 SSE 进度事件。",
         lifespan=lifespan,
     )

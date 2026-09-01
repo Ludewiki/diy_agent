@@ -41,6 +41,14 @@ class Settings:
     otel_trace_sample_ratio: float = 1.0
     otel_service_name_prefix: str = "diy-agent"
     otel_deployment_environment: str = "development"
+    context_max_input_tokens: int = 12000
+    context_system_reserved_tokens: int = 1400
+    context_tool_reserved_tokens: int = 3200
+    context_output_reserved_tokens: int = 1800
+    context_recent_message_limit: int = 8
+    context_summary_max_tokens: int = 1200
+    agent_max_llm_calls: int = 6
+    agent_max_tool_calls: int = 4
 
     def validate(self) -> None:
         if self.worker_poll_seconds <= 0:
@@ -63,6 +71,24 @@ class Settings:
             raise ValueError("OTEL_TRACE_SAMPLE_RATIO 必须介于 0 和 1 之间")
         if self.otel_enabled and not self.otel_exporter_otlp_endpoint:
             raise ValueError("启用 OpenTelemetry 时必须设置 OTEL_EXPORTER_OTLP_ENDPOINT")
+        if self.context_max_input_tokens < 1024:
+            raise ValueError("CONTEXT_MAX_INPUT_TOKENS 必须至少为 1024")
+        if min(
+            self.context_system_reserved_tokens,
+            self.context_tool_reserved_tokens,
+            self.context_output_reserved_tokens,
+            self.context_summary_max_tokens,
+        ) < 0:
+            raise ValueError("上下文各项 Token 预算不能小于 0")
+        if (
+            self.context_system_reserved_tokens + self.context_tool_reserved_tokens
+            >= self.context_max_input_tokens
+        ):
+            raise ValueError("系统提示与 Tool 预留之和必须小于输入上下文预算")
+        if self.context_recent_message_limit < 1:
+            raise ValueError("CONTEXT_RECENT_MESSAGE_LIMIT 必须至少为 1")
+        if self.agent_max_llm_calls < 1 or self.agent_max_tool_calls < 1:
+            raise ValueError("Agent 的 LLM 与 Tool 调用上限必须至少为 1")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -107,4 +133,24 @@ class Settings:
                 "OTEL_DEPLOYMENT_ENVIRONMENT",
                 "development",
             ),
+            context_max_input_tokens=int(
+                os.getenv("CONTEXT_MAX_INPUT_TOKENS", "12000")
+            ),
+            context_system_reserved_tokens=int(
+                os.getenv("CONTEXT_SYSTEM_RESERVED_TOKENS", "1400")
+            ),
+            context_tool_reserved_tokens=int(
+                os.getenv("CONTEXT_TOOL_RESERVED_TOKENS", "3200")
+            ),
+            context_output_reserved_tokens=int(
+                os.getenv("CONTEXT_OUTPUT_RESERVED_TOKENS", "1800")
+            ),
+            context_recent_message_limit=int(
+                os.getenv("CONTEXT_RECENT_MESSAGE_LIMIT", "8")
+            ),
+            context_summary_max_tokens=int(
+                os.getenv("CONTEXT_SUMMARY_MAX_TOKENS", "1200")
+            ),
+            agent_max_llm_calls=int(os.getenv("AGENT_MAX_LLM_CALLS", "6")),
+            agent_max_tool_calls=int(os.getenv("AGENT_MAX_TOOL_CALLS", "4")),
         )

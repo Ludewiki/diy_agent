@@ -36,6 +36,7 @@ class WorkerLeaseLost(RuntimeError):
 class RunExecutionInput:
     prompt: str
     session_id: uuid.UUID
+    message_id: uuid.UUID
     trace_context: dict[str, Any] | None
     attempt_count: int
 
@@ -367,6 +368,7 @@ def get_run_execution_input(
         return RunExecutionInput(
             prompt=message.content,
             session_id=run.session_id,
+            message_id=message.id,
             trace_context=decode_json(run.trace_context_json),
             attempt_count=run.attempt_count,
         )

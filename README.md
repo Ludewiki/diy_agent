@@ -13,6 +13,8 @@ flowchart LR
     API -->|同步演示| AGENT[LangChain Agent]
     WORKER[独立 Worker] -->|FOR UPDATE SKIP LOCKED| PG
     WORKER -->|心跳续租 / 重试| PG
+    WORKER --> CONTEXT[Token 预算 / 历史窗口 / 滚动摘要]
+    CONTEXT -->|同一 Session 上下文| AGENT
     WORKER --> AGENT
     AGENT --> WEATHER[天气 Tool]
     WEATHER --> GUIDE[攻略与景点 Tool]
@@ -36,6 +38,7 @@ flowchart LR
 - 城市、旅行天数、兴趣、预算和补充偏好输入；
 - 天气 Tool 返回后实时展示前三个连续候选日期；
 - 使用持久化 SSE Event 展示 Run、Agent 和 Tool 进度，断线后由服务端回放；
+- 实时展示本次 Run 使用的历史消息数、滚动摘要状态和估算 Token 占用；
 - Leaflet + OpenStreetMap 展示每日景点顺序，无外网或 Leaflet 不可用时降级到原生 SVG 坐标路线；
 - 展示 Wikivoyage 来源、Open-Meteo/ORS 使用状态、风险提示与最终 Agent 行程。
 
@@ -53,6 +56,7 @@ Tool 输出不会原样推送到浏览器。后端只对白名单字段生成展
 | `app/main.py` | FastAPI 路由、同步接口、Run API 和 SSE |
 | `app/models.py` | SQLAlchemy Session、Message、Run、Event 模型 |
 | `app/store.py` | 事务、任务领取、租约、重试、取消和事件持久化 |
+| `app/context.py` | Token 估算、最近历史窗口与幂等滚动摘要 |
 | `app/worker.py` | 独立 Worker、租约心跳和 Agent 执行 |
 | `app/telemetry.py` | OpenTelemetry SDK、Trace 传播和业务 Metrics |
 | `app/web/` | 无构建 Web 页面、响应式视觉、SSE 和地图交互 |
@@ -61,7 +65,7 @@ Tool 输出不会原样推送到浏览器。后端只对白名单字段生成展
 | `benchmarks/` | PostgreSQL 并发、Exactly-once 和租约回收基准 |
 | `tests/` | 离线单元测试和 PostgreSQL 集成测试 |
 
-架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md)、[ADR 0005](docs/adr/0005-container-runtime-and-ci.md)、[ADR 0006](docs/adr/0006-opentelemetry-and-runtime-benchmark.md) 和 [ADR 0007](docs/adr/0007-web-product-entry.md)。
+架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md)、[ADR 0005](docs/adr/0005-container-runtime-and-ci.md)、[ADR 0006](docs/adr/0006-opentelemetry-and-runtime-benchmark.md)、[ADR 0007](docs/adr/0007-web-product-entry.md) 和 [ADR 0008](docs/adr/0008-multi-turn-context-and-short-term-memory.md)。
 
 ## Docker Compose 一键启动
 
@@ -110,6 +114,8 @@ API 响应包含 `X-Trace-ID`、`X-Request-ID` 和 `Server-Timing`。系统只�
 | 重试/租约回收 | `agent.run.retries`、`agent.run.lease_reclaims` |
 | LLM Token | `agent.llm.tokens`，按 input/output/total 区分 |
 | Worker/积压 | `agent.workers.active`、`agent.runs.pending` |
+| 上下文 Token/历史条数 | `agent.context.input.tokens`、`agent.context.history.messages` |
+| 摘要/裁剪/调用次数 | `agent.context.messages.summarized`、`agent.context.messages.truncated`、`agent.context.summaries`、`agent.run.llm.invocations`、`agent.run.tool.invocations` |
 
 本地入口：
 
@@ -226,6 +232,25 @@ uv run python -m app.worker --env-file .env
 
 Worker 通过 `WORKER_LEASE_SECONDS`、`WORKER_HEARTBEAT_SECONDS`、`WORKER_RETRY_DELAY_SECONDS` 和 `WORKER_MAX_ATTEMPTS` 控制租约与重试。心跳周期必须小于租约时长。PostgreSQL 的 `FOR UPDATE SKIP LOCKED` 允许多个 Worker 并发领取不同任务；租约过期后任务可被回收，旧 Worker 的结果会被 fencing 检查拒绝。
 
+## 多轮上下文与短期记忆
+
+异步 Worker 执行 Run 前会读取同一 Session、当前用户消息之前的对话。当前问题始终完整保留；最近最多 `CONTEXT_RECENT_MESSAGE_LIMIT` 条消息按 Token 预算保留原文，更早内容写入 Session 级滚动摘要。摘要游标记录已经覆盖到的 Message ID，后续 Run 与失败重试不会重复总结同一批消息。
+
+滚动摘要使用确定性的抽取式实现，不额外调用模型，因此不会增加隐藏的 LLM 成本、重试点或摘要幻觉；`Summarizer` 接口可在未来替换成经过评测的模型摘要器。`tiktoken` 用于稳定估算上下文占用，模型 API 返回的实际 Token 仍由 `agent.llm.tokens` 单独记录。
+
+| 环境变量 | 默认值 | 作用 |
+| --- | ---: | --- |
+| `CONTEXT_MAX_INPUT_TOKENS` | 12000 | 输入上下文总预算 |
+| `CONTEXT_SYSTEM_RESERVED_TOKENS` | 1400 | 系统提示预留 |
+| `CONTEXT_TOOL_RESERVED_TOKENS` | 3200 | Tool Schema/结果预留 |
+| `CONTEXT_OUTPUT_RESERVED_TOKENS` | 1800 | 模型最大输出 |
+| `CONTEXT_RECENT_MESSAGE_LIMIT` | 8 | 保留完整原文的最近消息上限 |
+| `CONTEXT_SUMMARY_MAX_TOKENS` | 1200 | 滚动摘要上限 |
+| `AGENT_MAX_LLM_CALLS` | 6 | 单次 Run 的 LLM 调用硬上限 |
+| `AGENT_MAX_TOOL_CALLS` | 4 | 单次 Run 的 Tool 调用硬上限 |
+
+Worker 会通过 `CONTEXT_PREPARED` SSE 事件发送历史条数、摘要状态和 Token 数；不会发送历史或摘要正文。达到调用上限时写入 `CONTEXT_LIMIT_REACHED`，Run 以不可重试的 `AGENT_INVOCATION_LIMIT_EXCEEDED` 结束。同一 Session 的历史消息与摘要会随当前请求发送给配置的 DeepSeek 服务，部署方应在隐私政策中披露，并为敏感场景增加脱敏、保留期和删除能力。
+
 ## 测试
 
 默认测试使用临时 SQLite，仅作为快速、隔离的持久化替身，不是正式运行时：
@@ -242,7 +267,7 @@ $env:TEST_DATABASE_URL="postgresql+psycopg://diy_agent:password@localhost:5432/d
 uv run pytest -m postgres
 ```
 
-当前默认回归结果为 `31 passed, 1 skipped`；跳过项是未设置 `TEST_DATABASE_URL` 时的 PostgreSQL 集成测试。
+当前默认回归结果为 `36 passed, 1 skipped`；跳过项是未设置 `TEST_DATABASE_URL` 时的 PostgreSQL 集成测试。
 
 ![离线测试演示](docs/images/test-demo.svg)
 

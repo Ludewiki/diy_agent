@@ -50,6 +50,13 @@ class Instruments:
     lease_reclaims: Any
     run_claims: Any
     active_workers: Any
+    context_input_tokens: Any
+    context_history_messages: Any
+    context_messages_summarized: Any
+    context_messages_truncated: Any
+    context_summaries: Any
+    run_llm_invocations: Any
+    run_tool_invocations: Any
 
 
 class TelemetryRuntime:
@@ -88,7 +95,7 @@ class TelemetryRuntime:
         resource = Resource.create(
             {
                 "service.name": service_name,
-                "service.version": "0.5.0",
+                "service.version": "0.6.0",
                 "service.instance.id": str(uuid.uuid4()),
                 "deployment.environment.name": (
                     settings.otel_deployment_environment
@@ -141,6 +148,29 @@ class TelemetryRuntime:
                 "agent.llm.duration",
             )
         ]
+        views.append(
+            View(
+                instrument_name="agent.context.input.tokens",
+                aggregation=ExplicitBucketHistogramAggregation(
+                    (128, 256, 512, 1024, 2048, 4096, 8192, 12000, 16000)
+                ),
+            )
+        )
+        views.extend(
+            [
+                View(
+                    instrument_name=name,
+                    aggregation=ExplicitBucketHistogramAggregation(
+                        (0, 1, 2, 4, 6, 8, 12, 20, 40)
+                    ),
+                )
+                for name in (
+                    "agent.context.history.messages",
+                    "agent.run.llm.invocations",
+                    "agent.run.tool.invocations",
+                )
+            ]
+        )
         metric_reader = PeriodicExportingMetricReader(
             OTLPMetricExporter(endpoint=f"{endpoint}/v1/metrics"),
             export_interval_millis=settings.otel_metric_export_interval_ms,
@@ -159,8 +189,8 @@ class TelemetryRuntime:
         metrics.set_meter_provider(meter_provider)
         self.tracer_provider = tracer_provider
         self.meter_provider = meter_provider
-        self.tracer = trace.get_tracer("diy-agent.runtime", "0.5.0")
-        meter = metrics.get_meter("diy-agent.runtime", "0.5.0")
+        self.tracer = trace.get_tracer("diy-agent.runtime", "0.6.0")
+        meter = metrics.get_meter("diy-agent.runtime", "0.6.0")
         self.instruments = Instruments(
             http_duration=meter.create_histogram(
                 "agent.http.server.duration",
@@ -221,6 +251,41 @@ class TelemetryRuntime:
                 "agent.workers.active",
                 unit="1",
                 description="Number of active Worker processes.",
+            ),
+            context_input_tokens=meter.create_histogram(
+                "agent.context.input.tokens",
+                unit="{token}",
+                description="Estimated input context tokens prepared for a Run.",
+            ),
+            context_history_messages=meter.create_histogram(
+                "agent.context.history.messages",
+                unit="{message}",
+                description="Full recent messages retained in a Run context.",
+            ),
+            context_messages_summarized=meter.create_counter(
+                "agent.context.messages.summarized",
+                unit="{message}",
+                description="Messages newly folded into rolling summaries.",
+            ),
+            context_messages_truncated=meter.create_counter(
+                "agent.context.messages.truncated",
+                unit="{message}",
+                description="Recent messages truncated to fit the context budget.",
+            ),
+            context_summaries=meter.create_counter(
+                "agent.context.summaries",
+                unit="1",
+                description="Rolling summary updates.",
+            ),
+            run_llm_invocations=meter.create_histogram(
+                "agent.run.llm.invocations",
+                unit="{call}",
+                description="LLM invocations made by one Run attempt.",
+            ),
+            run_tool_invocations=meter.create_histogram(
+                "agent.run.tool.invocations",
+                unit="{call}",
+                description="Tool invocations made by one Run attempt.",
             ),
         )
         self.enabled = True
@@ -288,7 +353,7 @@ class TelemetryRuntime:
                     extra={"event": "telemetry_gauge_failed"},
                 )
 
-        meter = metrics.get_meter("diy-agent.runtime", "0.5.0")
+        meter = metrics.get_meter("diy-agent.runtime", "0.6.0")
         meter.create_observable_gauge(
             "agent.runs.pending",
             callbacks=[observe_pending_runs],
@@ -369,6 +434,56 @@ def record_run_execution(duration_seconds: float, *, outcome: str) -> None:
             duration_seconds,
             {"agent.run.outcome": outcome},
         )
+
+
+def record_context_prepared(
+    *,
+    estimated_input_tokens: int,
+    history_messages: int,
+    messages_summarized: int,
+    messages_truncated: int,
+    summary_updated: bool,
+    over_budget: bool,
+) -> None:
+    if runtime.instruments is None:
+        return
+    attributes = {
+        "agent.context.summary_updated": summary_updated,
+        "agent.context.over_budget": over_budget,
+    }
+    runtime.instruments.context_input_tokens.record(
+        estimated_input_tokens,
+        attributes,
+    )
+    runtime.instruments.context_history_messages.record(
+        history_messages,
+        attributes,
+    )
+    if messages_summarized > 0:
+        runtime.instruments.context_messages_summarized.add(
+            messages_summarized,
+            attributes,
+        )
+    if messages_truncated > 0:
+        runtime.instruments.context_messages_truncated.add(
+            messages_truncated,
+            attributes,
+        )
+    if summary_updated:
+        runtime.instruments.context_summaries.add(1, attributes)
+
+
+def record_run_invocations(
+    *,
+    llm_calls: int,
+    tool_calls: int,
+    outcome: str,
+) -> None:
+    if runtime.instruments is None:
+        return
+    attributes = {"agent.run.outcome": outcome}
+    runtime.instruments.run_llm_invocations.record(llm_calls, attributes)
+    runtime.instruments.run_tool_invocations.record(tool_calls, attributes)
 
 
 def record_run_retry(error_code: str) -> None:

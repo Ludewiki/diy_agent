@@ -36,7 +36,12 @@ def _eligible_run_ids(database: Database) -> list[uuid.UUID]:
         )
 
 
-def synthetic_runner(prompt: str, *, callbacks: list[Any]) -> dict[str, Any]:
+def synthetic_runner(
+    prompt: str,
+    *,
+    callbacks: list[Any],
+    context: Any,
+) -> dict[str, Any]:
     llm_id = uuid.uuid4()
     for callback in callbacks:
         callback.on_chat_model_start(

@@ -21,11 +21,17 @@ from pydantic import BaseModel
 
 from logging_config import configure_logging
 from weather_window import run_prompt
-from .callbacks import ProgressCallback, RunCancelled
+from .callbacks import (
+    ProgressCallback,
+    RunCancelled,
+    RunInvocationLimitExceeded,
+)
 from .config import Settings
+from .context import ContextPolicy, prepare_session_context
 from .database import Database
 from .store import (
     WorkerLeaseLost,
+    append_event,
     claim_next_run,
     complete_run,
     fail_run,
@@ -34,6 +40,8 @@ from .store import (
 )
 from .telemetry import (
     extract_trace_context,
+    record_context_prepared,
+    record_run_invocations,
     record_run_execution,
     runtime as telemetry_runtime,
     set_worker_active,
@@ -150,6 +158,9 @@ def execute_run(
     lease_seconds: float,
     heartbeat_seconds: float,
     retry_delay_seconds: float,
+    context_policy: ContextPolicy | None = None,
+    max_llm_calls: int = 6,
+    max_tool_calls: int = 4,
     runner: Runner = run_prompt,
 ) -> None:
     execution_input = get_run_execution_input(database, run_id)
@@ -164,7 +175,14 @@ def execute_run(
             retry_delay_seconds=retry_delay_seconds,
         )
         return
-    callback = ProgressCallback(database, run_id, worker_id)
+    resolved_context_policy = context_policy or ContextPolicy()
+    callback = ProgressCallback(
+        database,
+        run_id,
+        worker_id,
+        max_llm_calls=max_llm_calls,
+        max_tool_calls=max_tool_calls,
+    )
     parent_context = extract_trace_context(execution_input.trace_context)
     started = time.perf_counter()
     outcome = "error"
@@ -187,9 +205,42 @@ def execute_run(
                 lease_seconds,
                 heartbeat_seconds,
             ) as heartbeat:
+                prepared_context = prepare_session_context(
+                    database,
+                    execution_input.session_id,
+                    execution_input.message_id,
+                    execution_input.prompt,
+                    policy=resolved_context_policy,
+                )
+                usage = prepared_context.usage
+                span.set_attributes(
+                    {
+                        "agent.context.estimated_input_tokens": usage.estimated_input_tokens,
+                        "agent.context.history_messages": usage.history_messages_used,
+                        "agent.context.summary_present": usage.summary_present,
+                        "agent.context.summary_updated": usage.summary_updated,
+                        "agent.context.over_budget": usage.over_budget,
+                    }
+                )
+                record_context_prepared(
+                    estimated_input_tokens=usage.estimated_input_tokens,
+                    history_messages=usage.history_messages_used,
+                    messages_summarized=usage.messages_summarized,
+                    messages_truncated=usage.messages_truncated,
+                    summary_updated=usage.summary_updated,
+                    over_budget=usage.over_budget,
+                )
+                append_event(
+                    database,
+                    run_id,
+                    "CONTEXT_PREPARED",
+                    usage.event_data(),
+                    expected_worker_id=worker_id,
+                )
                 answer = runner(
                     execution_input.prompt,
                     callbacks=[callback],
+                    context=prepared_context,
                 )
                 if heartbeat.lost.is_set():
                     raise WorkerLeaseLost(f"Worker 已失去 Run {run_id} 的租约。")
@@ -216,6 +267,19 @@ def execute_run(
                 "worker lease lost; stale result discarded",
                 extra={"event": "worker_lease_lost", "request_id": str(run_id)},
             )
+        except RunInvocationLimitExceeded as exc:
+            outcome = "limit_exceeded"
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            record_failure_if_owned(
+                database,
+                run_id,
+                worker_id,
+                "AGENT_INVOCATION_LIMIT_EXCEEDED",
+                str(exc),
+                retryable=False,
+                retry_delay_seconds=retry_delay_seconds,
+            )
         except Exception as exc:
             outcome = "error"
             span.record_exception(exc)
@@ -239,6 +303,11 @@ def execute_run(
                 time.perf_counter() - started,
                 outcome=outcome,
             )
+            record_run_invocations(
+                llm_calls=callback.llm_call_count,
+                tool_calls=callback.tool_call_count,
+                outcome=outcome,
+            )
 
 
 def run_once(
@@ -249,6 +318,9 @@ def run_once(
     lease_seconds: float = 120.0,
     heartbeat_seconds: float = 30.0,
     retry_delay_seconds: float = 5.0,
+    context_policy: ContextPolicy | None = None,
+    max_llm_calls: int = 6,
+    max_tool_calls: int = 4,
 ) -> uuid.UUID | None:
     resolved_worker_id = worker_id or create_worker_id()
     with telemetry_runtime.tracer.start_as_current_span(
@@ -268,6 +340,9 @@ def run_once(
         lease_seconds=lease_seconds,
         heartbeat_seconds=heartbeat_seconds,
         retry_delay_seconds=retry_delay_seconds,
+        context_policy=context_policy,
+        max_llm_calls=max_llm_calls,
+        max_tool_calls=max_tool_calls,
         runner=runner,
     )
     return run_id
@@ -304,6 +379,9 @@ def serve(
                 lease_seconds=settings.worker_lease_seconds,
                 heartbeat_seconds=settings.worker_heartbeat_seconds,
                 retry_delay_seconds=settings.worker_retry_delay_seconds,
+                context_policy=ContextPolicy.from_settings(settings),
+                max_llm_calls=settings.agent_max_llm_calls,
+                max_tool_calls=settings.agent_max_tool_calls,
             )
             if claimed is None:
                 time.sleep(settings.worker_poll_seconds)
@@ -337,6 +415,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lease_seconds=settings.worker_lease_seconds,
                 heartbeat_seconds=settings.worker_heartbeat_seconds,
                 retry_delay_seconds=settings.worker_retry_delay_seconds,
+                context_policy=ContextPolicy.from_settings(settings),
+                max_llm_calls=settings.agent_max_llm_calls,
+                max_tool_calls=settings.agent_max_tool_calls,
             )
         else:
             serve(database, settings)
