@@ -34,6 +34,22 @@ class RunInvocationLimitExceeded(RuntimeError):
         super().__init__(f"{kind} 调用次数已达到本次 Run 的上限 {limit}。")
 
 
+class ToolExecutionFailed(RuntimeError):
+    def __init__(
+        self,
+        tool_name: str,
+        error_code: str,
+        message: str,
+        *,
+        retryable: bool,
+    ) -> None:
+        self.tool_name = tool_name
+        self.error_code = error_code
+        self.user_message = message
+        self.retryable = retryable
+        super().__init__(f"{tool_name}: {error_code}: {message}")
+
+
 @dataclass
 class _SpanState:
     span: trace.Span
@@ -412,6 +428,14 @@ class ProgressCallback(BaseCallbackHandler):
                 duration = self._finish_span(state, error=error)
                 record_tool_call(name, duration, outcome)
         self._check_cancelled()
+        if outcome == "error":
+            result = _tool_result_object(output) or {}
+            raise ToolExecutionFailed(
+                name,
+                str(result.get("error_code") or "TOOL_EXECUTION_FAILED"),
+                str(result.get("message") or "Tool 执行失败。"),
+                retryable=bool(result.get("retryable", False)),
+            )
 
     def on_tool_error(
         self,

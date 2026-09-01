@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import json
 import os
 from pathlib import Path
 from typing import Any, Sequence
@@ -16,7 +17,7 @@ from typing import Any, Sequence
 from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
 from pydantic import BaseModel, Field
 
@@ -35,6 +36,121 @@ class Reference(BaseModel):
 class AnswerInfo(BaseModel):
     answer: str = Field(description="给用户的最终旅行规划")
     reference: list[Reference] = Field(default_factory=list, description="Wikivoyage 引用页面")
+
+
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "\n".join(part.strip() for part in parts if part.strip())
+    return ""
+
+
+def _tool_payload(message: ToolMessage) -> dict[str, Any] | None:
+    artifact = getattr(message, "artifact", None)
+    if isinstance(artifact, dict):
+        return artifact
+    content = message.content
+    if isinstance(content, dict):
+        return content
+    if not isinstance(content, str):
+        return None
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _answer_text_from_model(text: str) -> str:
+    normalized = text.strip()
+    if normalized.startswith("```") and normalized.endswith("```"):
+        lines = normalized.splitlines()
+        if len(lines) >= 3:
+            normalized = "\n".join(lines[1:-1]).strip()
+    try:
+        payload = json.loads(normalized)
+    except (TypeError, ValueError):
+        return text
+    if isinstance(payload, dict) and str(payload.get("answer") or "").strip():
+        return str(payload["answer"]).strip()
+    return text
+
+
+def _fallback_answer(messages: Sequence[Any]) -> AnswerInfo:
+    plan_payload: dict[str, Any] | None = None
+    last_tool_index = -1
+    for index, message in enumerate(messages):
+        if not isinstance(message, ToolMessage):
+            continue
+        last_tool_index = index
+        payload = _tool_payload(message)
+        if (
+            getattr(message, "name", None) == "plan_wikivoyage_trip"
+            and payload
+            and payload.get("status") == "ok"
+        ):
+            plan_payload = payload
+
+    final_text = ""
+    for message in reversed(messages[last_tool_index + 1 :]):
+        if isinstance(message, AIMessage):
+            final_text = _message_text(message.content)
+            if final_text:
+                break
+
+    references: list[Reference] = []
+    seen_urls: set[str] = set()
+    if plan_payload is not None:
+        for source in plan_payload.get("source_pages") or []:
+            if not isinstance(source, dict):
+                continue
+            title = str(source.get("title") or "").strip()
+            url = str(source.get("url") or "").strip()
+            if title and url and url not in seen_urls:
+                references.append(Reference(title=title, url=url))
+                seen_urls.add(url)
+
+    if final_text:
+        return AnswerInfo(
+            answer=_answer_text_from_model(final_text),
+            reference=references,
+        )
+    if plan_payload is None:
+        raise RuntimeError("Agent 没有生成结构化结果或可恢复的最终文本")
+
+    itinerary = plan_payload.get("itinerary") or []
+    dates = [
+        str(day.get("date"))
+        for day in itinerary
+        if isinstance(day, dict) and day.get("date")
+    ]
+    lines = [
+        f"{plan_payload.get('city', '目的地')}的"
+        f"{plan_payload.get('trip_days', len(itinerary))}日行程已经生成。"
+    ]
+    if dates:
+        lines.append(f"推荐日期：{dates[0]} 至 {dates[-1]}。")
+    for day in itinerary:
+        if not isinstance(day, dict):
+            continue
+        route = str(day.get("route_summary") or "").strip()
+        if route:
+            lines.append(f"{day.get('date', '当日')}：{route}。")
+    warnings = [
+        str(item).strip()
+        for item in (plan_payload.get("warnings") or [])
+        if str(item).strip()
+    ]
+    if warnings:
+        lines.append("风险与降级提示：" + "；".join(warnings))
+    return AnswerInfo(answer="\n".join(lines), reference=references)
 
 
 def _system_prompt(current_date: str) -> str:
@@ -120,9 +236,9 @@ def run_prompt(
         config=config,
     )
     answer = result.get("structured_response")
-    if answer is None:
-        raise RuntimeError("Agent 没有生成结构化结果")
-    return answer
+    if answer is not None:
+        return answer if isinstance(answer, AnswerInfo) else AnswerInfo.model_validate(answer)
+    return _fallback_answer(result.get("messages") or [])
 
 
 def main(argv: Sequence[str] | None = None) -> int:

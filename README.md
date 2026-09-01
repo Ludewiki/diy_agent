@@ -153,7 +153,7 @@ uv run python -m benchmarks.runtime_benchmark --worker-counts 2,4 --runs-per-sce
 | --- | --- | --- |
 | Open-Meteo | 地理编码和近期逐日天气 | 可用预报窗口有限，远期结果不确定 |
 | Wikivoyage MediaWiki API | 全球城市攻略、See/Do Listing | 城市与语言版本覆盖不均；遵守 CC BY-SA 归属要求 |
-| OpenRouteService | 地理编码、距离和时间矩阵 | 需要 `ORS_API_KEY`；配额有限，当前不含公交班次 |
+| OpenRouteService | 地理编码、距离和时间矩阵 | 需要 `ORS_API_KEY`；Geocoder 与 Matrix 权限可能分别开通，Geocoder 不可用时优先使用 Wikivoyage 自带坐标 |
 | DeepSeek | 意图识别、Tool 调用和回答组织 | 需要 `DEEPSEEK_API_KEY`；确定性评分和路线仍由代码完成 |
 
 项目不依赖绕过登录、验证码或反爬机制的小红书/携程抓取。酒店和票务应接入获得授权的开放 API、联盟 API 或沙箱，并在真实预订或支付前要求用户确认。
@@ -267,7 +267,7 @@ $env:TEST_DATABASE_URL="postgresql+psycopg://diy_agent:password@localhost:5432/d
 uv run pytest -m postgres
 ```
 
-当前默认回归结果为 `36 passed, 1 skipped`；跳过项是未设置 `TEST_DATABASE_URL` 时的 PostgreSQL 集成测试。
+当前默认回归结果为 `42 passed, 1 skipped`；跳过项是未设置 `TEST_DATABASE_URL` 时的 PostgreSQL 集成测试。
 
 ![离线测试演示](docs/images/test-demo.svg)
 
@@ -288,6 +288,7 @@ uv run pytest -m postgres
 - `.editorconfig`、`.gitattributes` 与 `PYTHONUTF8=1` 统一 UTF-8。
 - `logging_config.py` 输出 UTF-8 JSON Lines，并使用稳定的 `event`、`request_id` 和 `error_code` 字段。
 - 不记录 API Key、数据库密码、Cookie 或完整个人信息。
+- JSON 日志会对 URL 查询参数、Bearer Token 以及已注入的 DeepSeek/ORS Key 二次脱敏；密钥若曾出现在旧日志中仍必须立即轮换。
 - API Key 和数据库连接串只能来自环境变量或部署平台 Secret；提交前运行 `git check-ignore .env`。
 - API 对外部署前仍需加入认证、授权、限流和配额控制。
 

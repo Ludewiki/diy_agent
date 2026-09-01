@@ -6,6 +6,7 @@ from datetime import date, datetime, timezone
 import logging
 import os
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -18,6 +19,22 @@ from .sources import WikivoyageClient, extract_pois, is_university_attraction
 from .weather_assignment import assignment_costs, cluster_indoor_ratio, hungarian, weather_badness
 
 logger = logging.getLogger(__name__)
+
+
+def _request_status(exc: requests.RequestException) -> int | None:
+    return exc.response.status_code if exc.response is not None else None
+
+
+def _upstream_name(exc: requests.RequestException) -> str:
+    request = getattr(exc, "request", None)
+    response = getattr(exc, "response", None)
+    url = getattr(request, "url", None) or getattr(response, "url", None) or ""
+    host = (urlparse(str(url)).hostname or "").lower()
+    if "openrouteservice.org" in host:
+        return "OpenRouteService"
+    if "wikivoyage.org" in host or "wikimedia.org" in host:
+        return "Wikivoyage"
+    return "upstream"
 
 
 def plan_trip(config: TravelPlannerInput) -> dict[str, Any]:
@@ -63,11 +80,39 @@ def plan_trip(config: TravelPlannerInput) -> dict[str, Any]:
                 return tool_error("NO_LISTINGS_AFTER_FILTERING", "排除大学和校园类景点后，没有剩余可规划景点。", query_city=city)
 
         ors_client = OrsClient(ors_api_key)
+        geocoder_failure: tuple[int | None, str] | None = None
         for poi in pois:
             if poi.latitude is not None and poi.longitude is not None:
                 continue
             query = ", ".join(part for part in (poi.name, poi.address, city) if part)
-            match = ors_client.geocode(query)
+            try:
+                match = ors_client.geocode(query)
+            except requests.RequestException as exc:
+                status_code = _request_status(exc)
+                geocoder_failure = (status_code, _upstream_name(exc))
+                if status_code in {401, 403}:
+                    warnings.append(
+                        "ORS Geocoder 未授权；已跳过缺少坐标的景点，"
+                        "并继续使用 Wikivoyage 自带坐标。"
+                    )
+                else:
+                    warnings.append(
+                        "ORS Geocoder 暂时不可用；已跳过缺少坐标的景点。"
+                    )
+                logger.warning(
+                    "ORS geocoder unavailable; using source coordinates",
+                    extra={
+                        "event": "upstream_degraded",
+                        "tool_name": "plan_wikivoyage_trip",
+                        "city": city,
+                        "error_code": (
+                            "ORS_GEOCODER_FORBIDDEN"
+                            if status_code in {401, 403}
+                            else "ORS_GEOCODER_UNAVAILABLE"
+                        ),
+                    },
+                )
+                break
             if match is None:
                 continue
             latitude, longitude, confidence = match
@@ -82,6 +127,22 @@ def plan_trip(config: TravelPlannerInput) -> dict[str, Any]:
         ranked_all = sorted(pois, key=lambda item: item.score, reverse=True)
         usable = [poi for poi in ranked_all if not poi.permanently_closed and poi.latitude is not None and poi.longitude is not None and poi.visit_minutes <= config.daily_minutes - 60]
         if len(usable) < config.trip_days:
+            if geocoder_failure is not None:
+                status_code, provider = geocoder_failure
+                return tool_error(
+                    "ORS_GEOCODER_UNAVAILABLE",
+                    "ORS Geocoder 不可用，且 Wikivoyage 自带坐标不足以生成路线；"
+                    "请为 ORS Key 开通 Geocoder 权限后重试。",
+                    details={
+                        "provider": provider,
+                        "status_code": status_code,
+                        "parsed_count": len(pois),
+                        "usable_count": len(usable),
+                        "required_count": config.trip_days,
+                    },
+                    retryable=status_code not in {401, 403},
+                    query_city=city,
+                )
             return tool_error(
                 "INSUFFICIENT_MAPPABLE_ATTRACTIONS", "可可靠映射到地图且未疑似停业的景点少于游玩天数。",
                 details={"parsed_count": len(pois), "usable_count": len(usable), "required_count": config.trip_days}, query_city=city,
@@ -169,11 +230,43 @@ def plan_trip(config: TravelPlannerInput) -> dict[str, Any]:
         }
     except requests.Timeout:
         logger.warning("upstream timeout", extra={"event": "tool_failed", "tool_name": "plan_wikivoyage_trip", "city": city, "error_code": "UPSTREAM_TIMEOUT"})
-        return tool_error("UPSTREAM_TIMEOUT", "Wikivoyage 或 OpenRouteService 请求超时，请稍后重试。", query_city=city)
+        return tool_error(
+            "UPSTREAM_TIMEOUT",
+            "Wikivoyage 或 OpenRouteService 请求超时，请稍后重试。",
+            retryable=True,
+            query_city=city,
+        )
     except requests.RequestException as exc:
-        status_code = exc.response.status_code if exc.response is not None else None
-        logger.exception("upstream request failed", extra={"event": "tool_failed", "tool_name": "plan_wikivoyage_trip", "city": city, "error_code": "UPSTREAM_HTTP_ERROR"})
-        return tool_error("UPSTREAM_HTTP_ERROR", "访问 Wikivoyage 或 OpenRouteService 失败。", details={"status_code": status_code, "error": str(exc)}, query_city=city)
+        status_code = _request_status(exc)
+        provider = _upstream_name(exc)
+        if provider == "OpenRouteService" and status_code in {401, 403}:
+            error_code = "ORS_AUTH_FAILED"
+            message = "OpenRouteService 鉴权失败，请检查或轮换 ORS_API_KEY。"
+            retryable = False
+        elif status_code == 429:
+            error_code = "UPSTREAM_RATE_LIMITED"
+            message = f"{provider} 已达到请求频率上限，请稍后重试。"
+            retryable = True
+        else:
+            error_code = "UPSTREAM_HTTP_ERROR"
+            message = f"访问 {provider} 失败。"
+            retryable = status_code is None or status_code >= 500
+        logger.error(
+            "upstream request failed",
+            extra={
+                "event": "tool_failed",
+                "tool_name": "plan_wikivoyage_trip",
+                "city": city,
+                "error_code": error_code,
+            },
+        )
+        return tool_error(
+            error_code,
+            message,
+            details={"provider": provider, "status_code": status_code},
+            retryable=retryable,
+            query_city=city,
+        )
     except (ValueError, RuntimeError) as exc:
         logger.exception("travel planning failed", extra={"event": "tool_failed", "tool_name": "plan_wikivoyage_trip", "city": city, "error_code": "PLANNING_ERROR"})
         return tool_error("PLANNING_ERROR", str(exc), query_city=city)

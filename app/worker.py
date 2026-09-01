@@ -25,6 +25,7 @@ from .callbacks import (
     ProgressCallback,
     RunCancelled,
     RunInvocationLimitExceeded,
+    ToolExecutionFailed,
 )
 from .config import Settings
 from .context import ContextPolicy, prepare_session_context
@@ -266,6 +267,19 @@ def execute_run(
             logger.warning(
                 "worker lease lost; stale result discarded",
                 extra={"event": "worker_lease_lost", "request_id": str(run_id)},
+            )
+        except ToolExecutionFailed as exc:
+            outcome = "tool_error"
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            record_failure_if_owned(
+                database,
+                run_id,
+                worker_id,
+                exc.error_code,
+                exc.user_message,
+                retryable=exc.retryable,
+                retry_delay_seconds=retry_delay_seconds,
             )
         except RunInvocationLimitExceeded as exc:
             outcome = "limit_exceeded"

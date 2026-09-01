@@ -211,6 +211,45 @@ def test_tool_invocation_limit_fails_without_retry(
     assert "event: RUN_RETRY_SCHEDULED" not in events
 
 
+def test_tool_error_stops_agent_loop_immediately(
+    client: TestClient,
+    database: Database,
+) -> None:
+    _, run_id = _create_queued_run(client)
+    tool_calls = 0
+
+    def failing_runner(prompt: str, *, callbacks, context) -> dict:
+        nonlocal tool_calls
+        callback = callbacks[0]
+        tool_calls += 1
+        tool_run_id = uuid.uuid4()
+        callback.on_tool_start(
+            {"name": "plan_wikivoyage_trip"},
+            "{}",
+            run_id=tool_run_id,
+        )
+        callback.on_tool_end(
+            {
+                "status": "error",
+                "error_code": "ORS_AUTH_FAILED",
+                "message": "OpenRouteService 鉴权失败。",
+                "retryable": False,
+            },
+            run_id=tool_run_id,
+        )
+        raise AssertionError("Tool error 后不应继续执行 Agent")
+
+    assert str(run_once(database, failing_runner)) == run_id
+    run = client.get(f"/v1/runs/{run_id}").json()
+    assert tool_calls == 1
+    assert run["status"] == "FAILED"
+    assert run["error_code"] == "ORS_AUTH_FAILED"
+    assert run["error_message"] == "OpenRouteService 鉴权失败。"
+    events = client.get(f"/v1/runs/{run_id}/events").text
+    assert events.count("event: TOOL_FAILED") == 1
+    assert "event: CONTEXT_LIMIT_REACHED" not in events
+
+
 def test_api_errors_use_stable_contract(client: TestClient) -> None:
     response = client.get(f"/v1/runs/{uuid.uuid4()}")
     assert response.status_code == 404
