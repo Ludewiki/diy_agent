@@ -6,12 +6,13 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 import logging
+import secrets
 import time
 from typing import Any, AsyncIterator, Callable
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, Header, Query, Request, status
+from fastapi import Cookie, Depends, FastAPI, Header, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -22,11 +23,21 @@ from opentelemetry import trace
 
 from logging_config import configure_logging
 from weather_window import run_prompt
+from .auth import AuthService, tokens_match
 from .config import Settings
 from .database import Database
 from .errors import ApiError
-from .models import AgentRun, AgentSession, Message, RunStatus, TERMINAL_RUN_STATUSES
+from .models import (
+    AgentRun,
+    AgentSession,
+    Message,
+    RunStatus,
+    TERMINAL_RUN_STATUSES,
+    User,
+)
 from .schemas import (
+    AuthCredentials,
+    CsrfResponse,
     HealthResponse,
     InvokeRequest,
     InvokeResponse,
@@ -36,6 +47,7 @@ from .schemas import (
     RunResponse,
     SessionCreate,
     SessionResponse,
+    UserResponse,
 )
 from .store import (
     enqueue_message,
@@ -107,6 +119,7 @@ def create_app(
     runtime_database = database or Database(runtime_settings.database_url)
     if database is None:
         runtime_database.require_postgresql()
+    auth_service = AuthService(runtime_database, runtime_settings)
     telemetry_runtime.configure(
         runtime_settings,
         service_role="api",
@@ -126,7 +139,7 @@ def create_app(
 
     application = FastAPI(
         title="Weather-aware Travel Planner Agent API",
-        version="0.6.0",
+        version="0.7.0",
         description="Web 产品入口、PostgreSQL 会话、租约 Worker、重试与 SSE 进度事件。",
         lifespan=lifespan,
     )
@@ -138,7 +151,12 @@ def create_app(
         allow_origins=list(runtime_settings.cors_origins),
         allow_credentials=True,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type", "Last-Event-ID", "X-Request-ID"],
+        allow_headers=[
+            "Content-Type",
+            "Last-Event-ID",
+            "X-CSRF-Token",
+            "X-Request-ID",
+        ],
         expose_headers=["X-Request-ID", "X-Trace-ID", "Server-Timing"],
     )
     application.mount(
@@ -203,6 +221,47 @@ def create_app(
             ),
         )
 
+    def require_csrf(request: Request) -> None:
+        origin = request.headers.get("Origin")
+        if origin:
+            request_origin = f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
+            allowed_origins = {
+                request_origin,
+                *(item.rstrip("/") for item in runtime_settings.csrf_trusted_origins),
+            }
+            if origin.rstrip("/") not in allowed_origins:
+                raise ApiError(
+                    403,
+                    "ORIGIN_NOT_ALLOWED",
+                    "请求来源不受信任。",
+                )
+        if not tokens_match(
+            request.cookies.get(runtime_settings.csrf_cookie_name),
+            request.headers.get("X-CSRF-Token"),
+        ):
+            raise ApiError(
+                403,
+                "CSRF_VALIDATION_FAILED",
+                "CSRF 校验失败，请刷新页面后重试。",
+            )
+
+    def current_user(
+        raw_token: str | None = Cookie(default=None, alias=runtime_settings.auth_cookie_name),
+    ) -> User:
+        return auth_service.current_user(raw_token)
+
+    def set_auth_cookie(response: Response, raw_token: str) -> None:
+        max_age = runtime_settings.auth_session_lifetime_days * 24 * 60 * 60
+        response.set_cookie(
+            key=runtime_settings.auth_cookie_name,
+            value=raw_token,
+            max_age=max_age,
+            httponly=True,
+            secure=runtime_settings.auth_cookie_secure,
+            samesite="lax",
+            path="/",
+        )
+
     @application.get("/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
         runtime_database.check_connection()
@@ -210,7 +269,83 @@ def create_app(
 
     @application.get("/", include_in_schema=False)
     def product_page() -> FileResponse:
-        return FileResponse(WEB_DIRECTORY / "index.html")
+        return FileResponse(
+            WEB_DIRECTORY / "index.html",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @application.get(
+        "/v1/auth/csrf",
+        response_model=CsrfResponse,
+        tags=["auth"],
+    )
+    def issue_csrf_token(response: Response) -> CsrfResponse:
+        token = secrets.token_urlsafe(32)
+        response.set_cookie(
+            key=runtime_settings.csrf_cookie_name,
+            value=token,
+            httponly=False,
+            secure=runtime_settings.auth_cookie_secure,
+            samesite="lax",
+            path="/",
+        )
+        return CsrfResponse(csrf_token=token)
+
+    @application.post(
+        "/v1/auth/register",
+        response_model=UserResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["auth"],
+        dependencies=[Depends(require_csrf)],
+    )
+    def register(payload: AuthCredentials, response: Response) -> User:
+        user, raw_token = auth_service.register(payload.email, payload.password)
+        set_auth_cookie(response, raw_token)
+        return user
+
+    @application.post(
+        "/v1/auth/login",
+        response_model=UserResponse,
+        tags=["auth"],
+        dependencies=[Depends(require_csrf)],
+    )
+    def login(payload: AuthCredentials, response: Response) -> User:
+        user, raw_token = auth_service.login(payload.email, payload.password)
+        set_auth_cookie(response, raw_token)
+        return user
+
+    @application.get(
+        "/v1/auth/me",
+        response_model=UserResponse,
+        tags=["auth"],
+    )
+    def me(user: User = Depends(current_user)) -> User:
+        return user
+
+    @application.post(
+        "/v1/auth/logout",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["auth"],
+        dependencies=[Depends(require_csrf)],
+    )
+    def logout(
+        response: Response,
+        raw_token: str | None = Cookie(
+            default=None,
+            alias=runtime_settings.auth_cookie_name,
+        ),
+        _user: User = Depends(current_user),
+    ) -> Response:
+        auth_service.revoke(raw_token)
+        response.delete_cookie(
+            runtime_settings.auth_cookie_name,
+            path="/",
+            secure=runtime_settings.auth_cookie_secure,
+            httponly=True,
+            samesite="lax",
+        )
+        response.status_code = status.HTTP_204_NO_CONTENT
+        return response
 
     @application.post(
         "/v1/agent/invoke",
@@ -218,7 +353,11 @@ def create_app(
         tags=["agent"],
         summary="同步执行 Agent（开发和演示用途）",
     )
-    def invoke_agent(payload: InvokeRequest) -> InvokeResponse:
+    def invoke_agent(
+        payload: InvokeRequest,
+        _user: User = Depends(current_user),
+        _csrf: None = Depends(require_csrf),
+    ) -> InvokeResponse:
         with telemetry_runtime.tracer.start_as_current_span(
             "agent.invoke",
             attributes={"agent.run.mode": "synchronous"},
@@ -245,25 +384,52 @@ def create_app(
         status_code=status.HTTP_201_CREATED,
         tags=["sessions"],
     )
-    def create_session(payload: SessionCreate) -> AgentSession:
+    def create_session(
+        payload: SessionCreate,
+        user: User = Depends(current_user),
+        _csrf: None = Depends(require_csrf),
+    ) -> AgentSession:
         with telemetry_runtime.tracer.start_as_current_span(
             "agent.session.create"
         ) as span:
             with runtime_database.session_factory.begin() as session:
-                conversation = AgentSession(title=payload.title)
+                conversation = AgentSession(user_id=user.id, title=payload.title)
                 session.add(conversation)
                 session.flush()
                 span.set_attribute("agent.session.id", str(conversation.id))
                 return conversation
 
     @application.get(
+        "/v1/sessions",
+        response_model=list[SessionResponse],
+        tags=["sessions"],
+    )
+    def list_sessions(user: User = Depends(current_user)) -> list[AgentSession]:
+        with runtime_database.session_factory() as session:
+            return list(
+                session.scalars(
+                    select(AgentSession)
+                    .where(AgentSession.user_id == user.id)
+                    .order_by(AgentSession.updated_at.desc(), AgentSession.id)
+                )
+            )
+
+    @application.get(
         "/v1/sessions/{session_id}",
         response_model=SessionResponse,
         tags=["sessions"],
     )
-    def get_session(session_id: uuid.UUID) -> AgentSession:
+    def get_session(
+        session_id: uuid.UUID,
+        user: User = Depends(current_user),
+    ) -> AgentSession:
         with runtime_database.session_factory() as session:
-            conversation = session.get(AgentSession, session_id)
+            conversation = session.scalar(
+                select(AgentSession).where(
+                    AgentSession.id == session_id,
+                    AgentSession.user_id == user.id,
+                )
+            )
             if conversation is None:
                 raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在。")
             return conversation
@@ -273,9 +439,18 @@ def create_app(
         response_model=list[MessageResponse],
         tags=["sessions"],
     )
-    def list_messages(session_id: uuid.UUID) -> list[Message]:
+    def list_messages(
+        session_id: uuid.UUID,
+        user: User = Depends(current_user),
+    ) -> list[Message]:
         with runtime_database.session_factory() as session:
-            if session.get(AgentSession, session_id) is None:
+            conversation = session.scalar(
+                select(AgentSession).where(
+                    AgentSession.id == session_id,
+                    AgentSession.user_id == user.id,
+                )
+            )
+            if conversation is None:
                 raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在。")
             return list(
                 session.scalars(
@@ -296,6 +471,8 @@ def create_app(
         session_id: uuid.UUID,
         payload: MessageCreate,
         request: Request,
+        user: User = Depends(current_user),
+        _csrf: None = Depends(require_csrf),
     ) -> QueuedRunResponse:
         with telemetry_runtime.tracer.start_as_current_span(
             "agent.session.load",
@@ -308,6 +485,7 @@ def create_app(
                 queued = enqueue_message(
                     runtime_database,
                     session_id,
+                    user.id,
                     payload.content,
                     max_attempts=runtime_settings.worker_max_attempts,
                 )
@@ -327,9 +505,19 @@ def create_app(
         response_model=RunResponse,
         tags=["runs"],
     )
-    def get_run(run_id: uuid.UUID) -> RunResponse:
+    def get_run(
+        run_id: uuid.UUID,
+        user: User = Depends(current_user),
+    ) -> RunResponse:
         with runtime_database.session_factory() as session:
-            run = session.get(AgentRun, run_id)
+            run = session.scalar(
+                select(AgentRun)
+                .join(AgentSession, AgentSession.id == AgentRun.session_id)
+                .where(
+                    AgentRun.id == run_id,
+                    AgentSession.user_id == user.id,
+                )
+            )
             if run is None:
                 raise ApiError(404, "RUN_NOT_FOUND", "Agent Run 不存在。")
             return RunResponse.model_validate(run_to_dict(run))
@@ -339,8 +527,12 @@ def create_app(
         response_model=RunResponse,
         tags=["runs"],
     )
-    def cancel_run(run_id: uuid.UUID) -> RunResponse:
-        run = request_cancellation(runtime_database, run_id)
+    def cancel_run(
+        run_id: uuid.UUID,
+        user: User = Depends(current_user),
+        _csrf: None = Depends(require_csrf),
+    ) -> RunResponse:
+        run = request_cancellation(runtime_database, run_id, user.id)
         if run is None:
             raise ApiError(404, "RUN_NOT_FOUND", "Agent Run 不存在。")
         return RunResponse.model_validate(run_to_dict(run))
@@ -356,9 +548,18 @@ def create_app(
         request: Request,
         after: int = Query(default=0, ge=0),
         last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+        user: User = Depends(current_user),
     ) -> StreamingResponse:
         with runtime_database.session_factory() as session:
-            if session.get(AgentRun, run_id) is None:
+            run = session.scalar(
+                select(AgentRun)
+                .join(AgentSession, AgentSession.id == AgentRun.session_id)
+                .where(
+                    AgentRun.id == run_id,
+                    AgentSession.user_id == user.id,
+                )
+            )
+            if run is None:
                 raise ApiError(404, "RUN_NOT_FOUND", "Agent Run 不存在。")
         cursor = after
         if last_event_id:

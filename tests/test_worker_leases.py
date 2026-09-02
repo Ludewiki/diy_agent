@@ -6,7 +6,7 @@ import uuid
 import pytest
 
 from app.database import Database
-from app.models import AgentRun, AgentSession, RunStatus, utc_now
+from app.models import AgentRun, AgentSession, RunStatus, User, utc_now
 from app.store import (
     WorkerLeaseLost,
     claim_next_run,
@@ -29,18 +29,35 @@ def database(tmp_path) -> Database:
 
 def _queued_run(database: Database, *, max_attempts: int = 3) -> uuid.UUID:
     with database.session_factory.begin() as session:
-        conversation = AgentSession(title="lease test")
+        user = User(
+            email=f"lease-{uuid.uuid4()}@example.com",
+            password_hash="not-used-in-this-test",
+        )
+        session.add(user)
+        session.flush()
+        conversation = AgentSession(user_id=user.id, title="lease test")
         session.add(conversation)
         session.flush()
         session_id = conversation.id
+        user_id = user.id
     queued = enqueue_message(
         database,
         session_id,
+        user_id,
         "plan a trip",
         max_attempts=max_attempts,
     )
     assert queued is not None
     return queued[1].id
+
+
+def _run_owner_id(database: Database, run_id: uuid.UUID) -> uuid.UUID:
+    with database.session_factory() as session:
+        run = session.get(AgentRun, run_id)
+        assert run is not None
+        conversation = session.get(AgentSession, run.session_id)
+        assert conversation is not None
+        return conversation.user_id
 
 
 def test_expired_run_is_reclaimed_and_stale_worker_is_fenced(
@@ -106,7 +123,7 @@ def test_running_cancellation_keeps_lease_until_worker_records_it(
 ) -> None:
     run_id = _queued_run(database)
     assert claim_next_run(database, "worker-a", lease_seconds=60) == run_id
-    cancelled = request_cancellation(database, run_id)
+    cancelled = request_cancellation(database, run_id, _run_owner_id(database, run_id))
     assert cancelled is not None
     assert cancelled.cancel_requested is True
     assert renew_lease(database, run_id, "worker-a", lease_seconds=60)
@@ -129,7 +146,10 @@ def test_cancelled_run_with_crashed_worker_is_finalized_after_lease_expiry(
 ) -> None:
     run_id = _queued_run(database, max_attempts=3)
     assert claim_next_run(database, "worker-a", lease_seconds=60) == run_id
-    assert request_cancellation(database, run_id) is not None
+    assert (
+        request_cancellation(database, run_id, _run_owner_id(database, run_id))
+        is not None
+    )
     with database.session_factory.begin() as session:
         run = session.get(AgentRun, run_id)
         assert run is not None

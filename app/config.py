@@ -49,6 +49,14 @@ class Settings:
     context_summary_max_tokens: int = 1200
     agent_max_llm_calls: int = 6
     agent_max_tool_calls: int = 4
+    auth_cookie_name: str = "diy_agent_session"
+    csrf_cookie_name: str = "diy_agent_csrf"
+    auth_session_lifetime_days: int = 7
+    auth_cookie_secure: bool = False
+    csrf_trusted_origins: tuple[str, ...] = (
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    )
 
     def validate(self) -> None:
         if self.worker_poll_seconds <= 0:
@@ -89,6 +97,10 @@ class Settings:
             raise ValueError("CONTEXT_RECENT_MESSAGE_LIMIT 必须至少为 1")
         if self.agent_max_llm_calls < 1 or self.agent_max_tool_calls < 1:
             raise ValueError("Agent 的 LLM 与 Tool 调用上限必须至少为 1")
+        if self.auth_session_lifetime_days < 1:
+            raise ValueError("AUTH_SESSION_LIFETIME_DAYS 必须至少为 1")
+        if not self.auth_cookie_name or not self.csrf_cookie_name:
+            raise ValueError("认证 Cookie 名称不能为空")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -97,6 +109,14 @@ class Settings:
             for item in os.getenv(
                 "CORS_ORIGINS",
                 "http://localhost:3000,http://localhost:5173",
+            ).split(",")
+            if item.strip()
+        )
+        trusted_origins = tuple(
+            item.strip().rstrip("/")
+            for item in os.getenv(
+                "CSRF_TRUSTED_ORIGINS",
+                "http://localhost:8000,http://127.0.0.1:8000",
             ).split(",")
             if item.strip()
         )
@@ -153,4 +173,11 @@ class Settings:
             ),
             agent_max_llm_calls=int(os.getenv("AGENT_MAX_LLM_CALLS", "6")),
             agent_max_tool_calls=int(os.getenv("AGENT_MAX_TOOL_CALLS", "4")),
+            auth_cookie_name=os.getenv("AUTH_COOKIE_NAME", "diy_agent_session"),
+            csrf_cookie_name=os.getenv("CSRF_COOKIE_NAME", "diy_agent_csrf"),
+            auth_session_lifetime_days=int(
+                os.getenv("AUTH_SESSION_LIFETIME_DAYS", "7")
+            ),
+            auth_cookie_secure=_environment_bool("AUTH_COOKIE_SECURE", False),
+            csrf_trusted_origins=trusted_origins,
         )

@@ -40,6 +40,9 @@
     currentDay: 0,
     warnings: new Set(defaultWarnings),
     extraSources: [],
+    user: null,
+    csrfToken: null,
+    authMode: "login",
   };
 
   function parseDate(value) {
@@ -171,9 +174,20 @@
   }
 
   async function requestJson(url, options) {
+    const requestOptions = options || {};
+    const method = String(requestOptions.method || "GET").toUpperCase();
+    const headers = {
+      "Content-Type": "application/json",
+      ...(requestOptions.headers || {}),
+    };
+    if (!["GET", "HEAD", "OPTIONS"].includes(method) && state.csrfToken) {
+      headers["X-CSRF-Token"] = state.csrfToken;
+    }
     const response = await fetch(url, {
-      headers: { "Content-Type": "application/json" },
-      ...options,
+      ...requestOptions,
+      method,
+      credentials: "same-origin",
+      headers,
     });
     let body = {};
     try {
@@ -208,6 +222,10 @@
 
   async function submitJourney(event) {
     event.preventDefault();
+    if (!state.user) {
+      openAuthDialog();
+      return;
+    }
     const formData = new FormData(event.currentTarget);
     const city = String(formData.get("city") || "").trim();
     if (!city) return;
@@ -734,7 +752,134 @@
     }
   }
 
+  async function refreshCsrfToken() {
+    const response = await fetch("/v1/auth/csrf", {
+      method: "GET",
+      credentials: "same-origin",
+    });
+    if (!response.ok) throw new Error("无法初始化安全会话，请刷新页面。");
+    const body = await response.json();
+    state.csrfToken = body.csrf_token;
+  }
+
+  function renderAuthState() {
+    const label = $("#account-label");
+    if (state.user) {
+      label.textContent = state.user.email;
+      $("#auth-close").classList.remove("is-hidden");
+    } else {
+      label.textContent = "登录";
+      $("#auth-close").classList.add("is-hidden");
+    }
+  }
+
+  function setAuthMode(mode) {
+    state.authMode = mode;
+    const registering = mode === "register";
+    $("#auth-title").textContent = registering ? "创建 Atlas 账号" : "登录 Atlas";
+    $("#auth-submit").firstElementChild.textContent = registering ? "创建账号并继续" : "登录并继续";
+    $("#auth-mode").textContent = registering
+      ? "已有账号？返回登录"
+      : "还没有账号？创建账号";
+    $("#auth-password").autocomplete = registering ? "new-password" : "current-password";
+    $("#auth-error").classList.add("is-hidden");
+  }
+
+  function openAuthDialog() {
+    setAuthMode("login");
+    const dialog = $("#auth-dialog");
+    if (dialog.open) return;
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute("open", "");
+      dialog.classList.add("dialog-fallback");
+    }
+  }
+
+  function closeAuthDialog() {
+    const dialog = $("#auth-dialog");
+    if (typeof dialog.close === "function") {
+      dialog.close();
+    } else {
+      dialog.removeAttribute("open");
+      dialog.classList.remove("dialog-fallback");
+    }
+  }
+
+  async function submitAuth(event) {
+    event.preventDefault();
+    const errorNode = $("#auth-error");
+    errorNode.classList.add("is-hidden");
+    const submit = $("#auth-submit");
+    submit.disabled = true;
+    try {
+      if (!state.csrfToken) await refreshCsrfToken();
+      const formData = new FormData(event.currentTarget);
+      const result = await requestJson("/v1/auth/" + state.authMode, {
+        method: "POST",
+        body: JSON.stringify({
+          email: String(formData.get("email") || "").trim(),
+          password: String(formData.get("password") || ""),
+        }),
+      });
+      state.user = result.body;
+      renderAuthState();
+      closeAuthDialog();
+      event.currentTarget.reset();
+    } catch (error) {
+      errorNode.textContent = error.message;
+      errorNode.classList.remove("is-hidden");
+    } finally {
+      submit.disabled = false;
+    }
+  }
+
+  async function logout() {
+    try {
+      await requestJson("/v1/auth/logout", { method: "POST" });
+    } finally {
+      state.user = null;
+      renderAuthState();
+      try {
+        await refreshCsrfToken();
+      } catch (_) {
+        state.csrfToken = null;
+      }
+      openAuthDialog();
+    }
+  }
+
+  async function bootstrapAuth() {
+    try {
+      await refreshCsrfToken();
+      const result = await requestJson("/v1/auth/me", { method: "GET" });
+      state.user = result.body;
+      renderAuthState();
+    } catch (_) {
+      state.user = null;
+      renderAuthState();
+      openAuthDialog();
+    }
+  }
+
   $("#planner-form").addEventListener("submit", submitJourney);
+  $("#auth-form").addEventListener("submit", submitAuth);
+  $("#auth-mode").addEventListener("click", () => {
+    setAuthMode(state.authMode === "login" ? "register" : "login");
+  });
+  $("#auth-close").addEventListener("click", closeAuthDialog);
+  $("#auth-dialog").addEventListener("cancel", (event) => {
+    if (!state.user) event.preventDefault();
+  });
+  $("#account-button").addEventListener("click", () => {
+    if (state.user) {
+      logout();
+    } else {
+      openAuthDialog();
+    }
+  });
   renderWarnings();
   renderSources();
+  bootstrapAuth();
 })();

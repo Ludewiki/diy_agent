@@ -9,6 +9,23 @@ import uuid
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class AuthCredentials(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=12, max_length=128)
+
+
+class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    email: str
+    created_at: datetime
+
+
+class CsrfResponse(BaseModel):
+    csrf_token: str
+
+
 class SessionCreate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
 

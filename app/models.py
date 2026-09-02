@@ -54,11 +54,49 @@ class Base(DeclarativeBase):
     pass
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=new_id
+    )
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=new_id
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+
+
 class AgentSession(Base):
     __tablename__ = "agent_sessions"
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=new_id
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default=SessionStatus.ACTIVE.value, index=True)

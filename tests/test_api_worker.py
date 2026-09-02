@@ -36,6 +36,18 @@ def client(database: Database) -> TestClient:
         },
     )
     with TestClient(app) as test_client:
+        csrf_response = test_client.get("/v1/auth/csrf")
+        csrf_token = csrf_response.json()["csrf_token"]
+        register_response = test_client.post(
+            "/v1/auth/register",
+            json={
+                "email": "api-worker@example.com",
+                "password": "correct-horse-battery-staple",
+            },
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert register_response.status_code == 201
+        test_client.headers.update({"X-CSRF-Token": csrf_token})
         yield test_client
 
 
@@ -64,6 +76,8 @@ def test_product_page_and_assets_are_served(client: TestClient) -> None:
     assert 'id="planner-form"' in page.text
     assert 'id="weather-candidates"' in page.text
     assert 'id="map"' in page.text
+    assert "/static/app.js?v=20260902-auth" in page.text
+    assert page.headers["cache-control"] == "no-cache"
     script = client.get("/static/app.js")
     assert script.status_code == 200
     assert "new EventSource" in script.text

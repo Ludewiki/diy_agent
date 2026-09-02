@@ -124,6 +124,105 @@ footer {
   text-decoration: none;
 }
 
+.account-button {
+  min-width: 86px;
+  max-width: 240px;
+  padding: 10px 15px;
+  color: var(--forest);
+  border: 1px solid rgba(22, 79, 66, 0.2);
+  border-radius: 999px;
+  background: rgba(255, 255, 252, 0.62);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auth-dialog {
+  width: min(480px, calc(100% - 30px));
+  padding: 0;
+  color: var(--ink);
+  border: 0;
+  border-radius: 28px;
+  background: transparent;
+  box-shadow: var(--shadow);
+}
+
+.auth-dialog::backdrop {
+  background: rgba(11, 28, 23, 0.53);
+  backdrop-filter: blur(10px);
+}
+
+.auth-dialog.dialog-fallback {
+  position: fixed;
+  z-index: 1000;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+}
+
+.auth-card {
+  padding: 36px;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 28px;
+  background:
+    radial-gradient(circle at 100% 0, rgba(201, 223, 213, 0.75), transparent 16rem),
+    #f7f5ef;
+}
+
+.auth-heading {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.auth-heading h2 {
+  margin: 9px 0 0;
+  font: 400 38px/1.1 Georgia, "Songti SC", serif;
+}
+
+.dialog-close {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+}
+
+.auth-copy,
+.auth-security {
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.auth-copy {
+  margin: 17px 0 25px;
+}
+
+.auth-security {
+  margin: 18px 0 0;
+  font-size: 11px;
+}
+
+.auth-error {
+  margin: 0 0 14px;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.auth-mode {
+  width: 100%;
+  margin-top: 15px;
+  padding: 8px;
+  color: var(--forest);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
 .live-dot {
   width: 8px;
   height: 8px;

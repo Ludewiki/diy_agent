@@ -6,7 +6,7 @@ import pytest
 
 from app.context import ContextPolicy, TokenCounter, prepare_session_context
 from app.database import Database
-from app.models import AgentSession, Message, MessageRole
+from app.models import AgentSession, Message, MessageRole, User
 
 
 @pytest.fixture
@@ -23,7 +23,13 @@ def _conversation_with_messages(
     contents: list[tuple[str, str]],
 ) -> tuple[uuid.UUID, list[uuid.UUID]]:
     with database.session_factory.begin() as session:
-        conversation = AgentSession(title="多轮旅行规划")
+        user = User(
+            email=f"context-{uuid.uuid4()}@example.com",
+            password_hash="not-used-in-this-test",
+        )
+        session.add(user)
+        session.flush()
+        conversation = AgentSession(user_id=user.id, title="多轮旅行规划")
         session.add(conversation)
         session.flush()
         messages = [

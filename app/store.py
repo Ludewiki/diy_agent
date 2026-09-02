@@ -147,12 +147,18 @@ def append_event(
 def enqueue_message(
     database: Database,
     session_id: uuid.UUID,
+    user_id: uuid.UUID,
     content: str,
     *,
     max_attempts: int = 3,
 ) -> tuple[Message, AgentRun] | None:
     with database.session_factory.begin() as session:
-        conversation = session.get(AgentSession, session_id)
+        conversation = session.scalar(
+            select(AgentSession).where(
+                AgentSession.id == session_id,
+                AgentSession.user_id == user_id,
+            )
+        )
         if conversation is None:
             return None
         message = Message(
@@ -496,9 +502,23 @@ def fail_run(
         return True
 
 
-def request_cancellation(database: Database, run_id: uuid.UUID) -> AgentRun | None:
+def request_cancellation(
+    database: Database,
+    run_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> AgentRun | None:
     with database.session_factory.begin() as session:
-        run = _locked_run(session, run_id)
+        statement = (
+            select(AgentRun)
+            .join(AgentSession, AgentSession.id == AgentRun.session_id)
+            .where(
+                AgentRun.id == run_id,
+                AgentSession.user_id == user_id,
+            )
+        )
+        if database.is_postgresql:
+            statement = statement.with_for_update()
+        run = session.scalar(statement)
         if run is None:
             return None
         if run.status in {

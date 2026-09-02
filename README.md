@@ -2,13 +2,14 @@
 
 面向全球城市的多工具旅行规划 Agent。系统先从近期预报中选择连续天气窗口，再从 Wikivoyage 提取景点，结合用户兴趣评分、OpenRouteService（ORS）交通矩阵、容量约束聚类和路径算法生成多日路线。
 
-当前工程提供可直接操作的 Web 产品页、同步演示接口和可恢复的异步执行链路：FastAPI 接收请求，PostgreSQL 持久化 Session、Message、Run 与 SSE Event，独立 Worker 使用数据库租约领取任务、续租、失败重试，并阻止失去租约的旧 Worker 写回结果。
+当前工程提供可直接操作的 Web 产品页、同步演示接口和可恢复的异步执行链路：FastAPI 接收请求，PostgreSQL 持久化 User、AuthSession、Agent Session、Message、Run 与 SSE Event，独立 Worker 使用数据库租约领取任务、续租、失败重试，并阻止失去租约的旧 Worker 写回结果。
 
 ## 架构
 
 ```mermaid
 flowchart LR
-    U[Web / 飞书] --> API[FastAPI]
+    U[Web / 飞书] -->|HttpOnly Cookie + CSRF| API[FastAPI]
+    API --> AUTH[User / AuthSession]
     API -->|Session / Message / Run| PG[(PostgreSQL)]
     API -->|同步演示| AGENT[LangChain Agent]
     WORKER[独立 Worker] -->|FOR UPDATE SKIP LOCKED| PG
@@ -44,6 +45,18 @@ flowchart LR
 
 Tool 输出不会原样推送到浏览器。后端只对白名单字段生成展示快照，未知 Tool 默认不暴露任何结果；动态上游文本使用 DOM `textContent` 渲染，不作为 HTML 注入。
 
+## 鉴权与数据隔离
+
+Web 页面提供注册、登录和退出入口。密码使用 Argon2id 哈希；登录后浏览器只持有随机、不透明的 Session Cookie，服务端仅保存它的 SHA-256 摘要。认证 Cookie 设置为 `HttpOnly`、`SameSite=Lax`，不会写入 `localStorage`；生产 HTTPS 环境必须设置 `AUTH_COOKIE_SECURE=true`。
+
+所有 Session、Message、Run、取消与 SSE 查询都同时校验当前 `user_id`。访问其他用户或不存在的资源统一返回 404，避免泄露资源是否存在。所有会改变状态的请求同时校验：
+
+- 可读 CSRF Cookie 与 `X-CSRF-Token` 请求头必须恒定时间匹配；
+- 浏览器发送 `Origin` 时必须是当前同源地址或 `CSRF_TRUSTED_ORIGINS` 中的明确来源；
+- SSE 使用同源 `EventSource`，HttpOnly Cookie 自动随请求发送，不需要把令牌暴露给 JavaScript。
+
+认证 API 为 `GET /v1/auth/csrf`、`POST /v1/auth/register`、`POST /v1/auth/login`、`GET /v1/auth/me` 和 `POST /v1/auth/logout`。此外，`GET /v1/sessions` 只返回当前用户的历史 Session，为后续历史会话页面和长期记忆提供安全的数据边界。
+
 ![Web 产品入口](docs/images/web-product.png)
 
 ## 主要目录
@@ -54,7 +67,8 @@ Tool 输出不会原样推送到浏览器。后端只对白名单字段生成展
 | `travel_planner/` | 数据源、评分、聚类、天气分配、路由和 Schema |
 | `weather_window.py` | 显式 Agent/CLI 入口，导入时不会调用模型或网络 |
 | `app/main.py` | FastAPI 路由、同步接口、Run API 和 SSE |
-| `app/models.py` | SQLAlchemy Session、Message、Run、Event 模型 |
+| `app/auth.py` | Argon2 密码校验、不透明 AuthSession、Cookie Token 摘要 |
+| `app/models.py` | SQLAlchemy User、AuthSession、Agent Session、Message、Run、Event 模型 |
 | `app/store.py` | 事务、任务领取、租约、重试、取消和事件持久化 |
 | `app/context.py` | Token 估算、最近历史窗口与幂等滚动摘要 |
 | `app/worker.py` | 独立 Worker、租约心跳和 Agent 执行 |
@@ -65,7 +79,7 @@ Tool 输出不会原样推送到浏览器。后端只对白名单字段生成展
 | `benchmarks/` | PostgreSQL 并发、Exactly-once 和租约回收基准 |
 | `tests/` | 离线单元测试和 PostgreSQL 集成测试 |
 
-架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md)、[ADR 0005](docs/adr/0005-container-runtime-and-ci.md)、[ADR 0006](docs/adr/0006-opentelemetry-and-runtime-benchmark.md)、[ADR 0007](docs/adr/0007-web-product-entry.md) 和 [ADR 0008](docs/adr/0008-multi-turn-context-and-short-term-memory.md)。
+架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md)、[ADR 0005](docs/adr/0005-container-runtime-and-ci.md)、[ADR 0006](docs/adr/0006-opentelemetry-and-runtime-benchmark.md)、[ADR 0007](docs/adr/0007-web-product-entry.md)、[ADR 0008](docs/adr/0008-multi-turn-context-and-short-term-memory.md) 和 [ADR 0009](docs/adr/0009-browser-auth-and-tenant-isolation.md)。
 
 ## Docker Compose 一键启动
 
@@ -97,6 +111,8 @@ docker compose logs -f api worker
 ```
 
 `DATABASE_URL` 在宿主机仍使用 `localhost`；Compose 会为容器内的 API、Worker 和 migration 自动改用服务名 `postgres`。生产部署必须通过 Secret 管理注入密码和 API Key，不能沿用模板中的开发密码。
+
+如果页面通过反向代理部署在 HTTPS 域名下，还必须将该完整 Origin 写入 `CSRF_TRUSTED_ORIGINS`，并设置 `AUTH_COOKIE_SECURE=true`。不要把认证 Cookie 改成可由 JavaScript 读取，也不要将 Session Token 或 JWT 放入 `localStorage`。
 
 ## 可观测性
 

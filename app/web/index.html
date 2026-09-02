@@ -13,14 +13,14 @@
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
       crossorigin=""
     >
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=20260902-auth">
     <script
       src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
       integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
       crossorigin=""
       defer
     ></script>
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=20260902-auth" defer></script>
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
@@ -36,8 +36,39 @@
         <span class="live-dot" aria-hidden="true"></span>
         <span>Weather-aware agent</span>
         <a href="/docs" target="_blank" rel="noreferrer">API</a>
+        <button id="account-button" class="account-button" type="button">
+          <span id="account-label">登录</span>
+        </button>
       </div>
     </header>
+
+    <dialog id="auth-dialog" class="auth-dialog" aria-labelledby="auth-title">
+      <form id="auth-form" class="auth-card">
+        <div class="auth-heading">
+          <div>
+            <p class="step-label">YOUR PRIVATE JOURNEY SPACE</p>
+            <h2 id="auth-title">登录 Atlas</h2>
+          </div>
+          <button id="auth-close" class="dialog-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <p class="auth-copy">登录后，Session、Message、Run 与实时进度只对你可见。</p>
+        <label class="field">
+          <span>邮箱</span>
+          <input id="auth-email" name="email" type="email" maxlength="320" autocomplete="email" required>
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input id="auth-password" name="password" type="password" minlength="12" maxlength="128" autocomplete="current-password" required>
+        </label>
+        <p id="auth-error" class="auth-error is-hidden" role="alert"></p>
+        <button id="auth-submit" class="primary-button" type="submit">
+          <span>登录并继续</span>
+          <span class="button-arrow" aria-hidden="true">→</span>
+        </button>
+        <button id="auth-mode" class="auth-mode" type="button">还没有账号？创建账号</button>
+        <p class="auth-security">使用服务端会话与 HttpOnly Cookie；浏览器不会把登录令牌写入 localStorage。</p>
+      </form>
+    </dialog>
 
     <main>
       <section class="hero">

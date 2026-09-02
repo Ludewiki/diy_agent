@@ -147,6 +147,17 @@ def _enqueue_runs(
         max_keepalive_connections=concurrency,
     )
     client = httpx.Client(base_url=base_url, timeout=10.0, limits=limits)
+    csrf_token = client.get("/v1/auth/csrf").json()["csrf_token"]
+    registration = client.post(
+        "/v1/auth/register",
+        json={
+            "email": f"benchmark-{uuid.uuid4()}@example.com",
+            "password": "benchmark-password-do-not-use",
+        },
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    registration.raise_for_status()
+    client.headers["X-CSRF-Token"] = csrf_token
 
     def create_run(index: int) -> uuid.UUID:
         started = time.perf_counter()
@@ -312,6 +323,17 @@ def _verify_crash_recovery(
     lease_seconds: float = 0.5,
 ) -> dict[str, Any]:
     with httpx.Client(base_url=base_url, timeout=10.0) as client:
+        csrf_token = client.get("/v1/auth/csrf").json()["csrf_token"]
+        registration = client.post(
+            "/v1/auth/register",
+            json={
+                "email": f"benchmark-recovery-{uuid.uuid4()}@example.com",
+                "password": "benchmark-password-do-not-use",
+            },
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        registration.raise_for_status()
+        client.headers["X-CSRF-Token"] = csrf_token
         session_response = client.post(
             "/v1/sessions",
             json={"title": "crash-recovery"},

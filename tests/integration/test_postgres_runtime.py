@@ -11,7 +11,7 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 
 from app.database import Database
-from app.models import AgentRun, AgentSession, RunEvent
+from app.models import AgentRun, AgentSession, RunEvent, User
 from app.store import claim_next_run, complete_run, enqueue_message
 
 
@@ -56,15 +56,27 @@ def test_migration_and_concurrent_worker_claims(
     postgres_database: Database,
 ) -> None:
     run_ids: list[uuid.UUID] = []
+    with postgres_database.session_factory.begin() as session:
+        user = User(
+            email="postgres-runtime@example.com",
+            password_hash="not-used-in-this-test",
+        )
+        session.add(user)
+        session.flush()
+        user_id = user.id
     for number in range(2):
         with postgres_database.session_factory.begin() as session:
-            conversation = AgentSession(title=f"postgres test {number}")
+            conversation = AgentSession(
+                user_id=user_id,
+                title=f"postgres test {number}",
+            )
             session.add(conversation)
             session.flush()
             session_id = conversation.id
         queued = enqueue_message(
             postgres_database,
             session_id,
+            user_id,
             f"trip request {number}",
         )
         assert queued is not None
