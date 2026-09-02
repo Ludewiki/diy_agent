@@ -43,6 +43,10 @@
     user: null,
     csrfToken: null,
     authMode: "login",
+    historyPage: 1,
+    historyTotal: 0,
+    historyPageSize: 8,
+    initialSessionRestored: false,
   };
 
   function parseDate(value) {
@@ -254,6 +258,7 @@
       $("#trace-id").textContent = state.traceId || "等待 Trace";
       setStatus("Run 已入队", "running");
       openEventStream(runResult.body.events_url);
+      loadSessionHistory({ restoreLatest: false });
     } catch (error) {
       setStatus("提交失败", "error");
       setButtonRunning(false);
@@ -337,6 +342,7 @@
       setStatus("规划完成", "success");
       setButtonRunning(false);
       fetchFinalRun();
+      loadSessionHistory({ restoreLatest: false });
     } else if (type === "RUN_FAILED" || type === "RUN_CANCELLED") {
       state.terminal = true;
       state.eventSource.close();
@@ -344,6 +350,7 @@
       setButtonRunning(false);
       showError(data.message || data.error_message || "Agent 未能生成完整行程。");
       fetchFinalRun();
+      loadSessionHistory({ restoreLatest: false });
     }
   }
 
@@ -767,9 +774,11 @@
     if (state.user) {
       label.textContent = state.user.email;
       $("#auth-close").classList.remove("is-hidden");
+      $("#history-button").classList.remove("is-hidden");
     } else {
       label.textContent = "登录";
       $("#auth-close").classList.add("is-hidden");
+      $("#history-button").classList.add("is-hidden");
     }
   }
 
@@ -827,6 +836,7 @@
       renderAuthState();
       closeAuthDialog();
       event.currentTarget.reset();
+      await loadSessionHistory({ restoreLatest: true });
     } catch (error) {
       errorNode.textContent = error.message;
       errorNode.classList.remove("is-hidden");
@@ -840,6 +850,7 @@
       await requestJson("/v1/auth/logout", { method: "POST" });
     } finally {
       state.user = null;
+      state.initialSessionRestored = false;
       renderAuthState();
       try {
         await refreshCsrfToken();
@@ -856,11 +867,213 @@
       const result = await requestJson("/v1/auth/me", { method: "GET" });
       state.user = result.body;
       renderAuthState();
+      await loadSessionHistory({ restoreLatest: true });
     } catch (_) {
       state.user = null;
       renderAuthState();
       openAuthDialog();
     }
+  }
+
+  function openHistoryDialog() {
+    const dialog = $("#history-dialog");
+    if (dialog.open) return;
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+  }
+
+  function closeHistoryDialog() {
+    const dialog = $("#history-dialog");
+    if (typeof dialog.close === "function") dialog.close();
+    else dialog.removeAttribute("open");
+  }
+
+  function formatSessionTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "时间未知";
+    return new Intl.DateTimeFormat("zh-CN", {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(date);
+  }
+
+  function statusLabel(status) {
+    const labels = {
+      PENDING: "排队中",
+      RUNNING: "执行中",
+      WAITING_FOR_USER: "等待补充",
+      SUCCEEDED: "已完成",
+      FAILED: "失败",
+      CANCELLED: "已取消",
+    };
+    return labels[status] || "暂无 Run";
+  }
+
+  async function loadSessionHistory({ restoreLatest = false } = {}) {
+    if (!state.user) return;
+    const includeArchived = $("#history-archived").checked;
+    try {
+      const result = await requestJson(
+        "/v1/sessions?page=" + state.historyPage +
+        "&page_size=" + state.historyPageSize +
+        "&include_archived=" + includeArchived,
+        { method: "GET" }
+      );
+      const data = result.body;
+      state.historyTotal = Number(data.total || 0);
+      renderSessionHistory(data.items || []);
+      $("#history-summary").textContent = "共 " + state.historyTotal + " 个会话";
+      $("#history-page").textContent = "第 " + state.historyPage + " 页";
+      $("#history-previous").disabled = state.historyPage <= 1;
+      $("#history-next").disabled =
+        state.historyPage * state.historyPageSize >= state.historyTotal;
+      if (
+        restoreLatest &&
+        !state.initialSessionRestored &&
+        data.items &&
+        data.items.length
+      ) {
+        state.initialSessionRestored = true;
+        await restoreSession(data.items[0], { closeDialog: false });
+      }
+    } catch (error) {
+      $("#history-summary").textContent = "历史会话读取失败：" + error.message;
+    }
+  }
+
+  function renderSessionHistory(items) {
+    const container = $("#history-list");
+    container.replaceChildren();
+    if (!items.length) {
+      container.append(create("div", "empty-copy", "还没有历史会话。"));
+      return;
+    }
+    items.forEach((item) => {
+      const card = create(
+        "article",
+        "history-item" + (item.id === state.sessionId ? " is-current" : "")
+      );
+      card.tabIndex = 0;
+      const top = create("div", "history-item-top");
+      top.append(
+        create("h3", "", item.title || "未命名旅行"),
+        create("span", "history-run-status", statusLabel(item.last_run_status))
+      );
+      const preview = create(
+        "p",
+        "",
+        item.recent_message_preview || "尚未发送消息"
+      );
+      const meta = create("div", "history-item-meta");
+      meta.append(
+        create("span", "", formatSessionTime(item.updated_at)),
+        create("span", "", Number(item.message_count || 0) + " 条消息"),
+        create("span", "", item.status === "ARCHIVED" ? "已归档" : "进行中")
+      );
+      const actions = create("div", "history-actions");
+      const rename = create("button", "", "重命名");
+      const archive = create(
+        "button",
+        "",
+        item.status === "ARCHIVED" ? "取消归档" : "归档"
+      );
+      const remove = create("button", "", "删除");
+      [rename, archive, remove].forEach((button) => {
+        button.type = "button";
+        button.addEventListener("click", (event) => event.stopPropagation());
+      });
+      rename.addEventListener("click", () => renameSession(item));
+      archive.addEventListener("click", () => archiveSession(item));
+      remove.addEventListener("click", () => deleteSession(item));
+      actions.append(rename, archive, remove);
+      card.append(top, preview, meta, actions);
+      card.addEventListener("click", () => restoreSession(item));
+      card.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") restoreSession(item);
+      });
+      container.append(card);
+    });
+  }
+
+  async function loadMessageTimeline(sessionId) {
+    const timeline = $("#history-timeline");
+    try {
+      const result = await requestJson(
+        "/v1/sessions/" + sessionId + "/messages",
+        { method: "GET" }
+      );
+      timeline.replaceChildren();
+      (result.body || []).slice(-12).forEach((message) => {
+        const node = create(
+          "div",
+          "history-message" + (message.role === "ASSISTANT" ? " is-assistant" : "")
+        );
+        node.append(
+          create("strong", "", message.role === "ASSISTANT" ? "AGENT" : "YOU"),
+          create("span", "", message.content)
+        );
+        timeline.append(node);
+      });
+      timeline.classList.toggle("is-hidden", !result.body.length);
+    } catch (_) {
+      timeline.classList.add("is-hidden");
+    }
+  }
+
+  async function restoreSession(item, { closeDialog = true } = {}) {
+    resetWorkspace(item.title || "历史旅行");
+    state.sessionId = item.id;
+    $("#journey-title").textContent = (item.title || "历史旅行") + " · 历史会话";
+    await loadMessageTimeline(item.id);
+    if (closeDialog) closeHistoryDialog();
+    if (!item.last_run_id) {
+      setStatus("尚未规划", "idle");
+      setButtonRunning(false);
+      return;
+    }
+    state.runId = item.last_run_id;
+    $("#run-reference").textContent =
+      "RUN " + state.runId.slice(0, 8).toUpperCase();
+    setStatus(statusLabel(item.last_run_status), "running");
+    setButtonRunning(["PENDING", "RUNNING"].includes(item.last_run_status));
+    openEventStream("/v1/runs/" + state.runId + "/events");
+  }
+
+  async function renameSession(item) {
+    const title = window.prompt("新的会话名称", item.title || "");
+    if (!title || !title.trim()) return;
+    await requestJson("/v1/sessions/" + item.id, {
+      method: "PATCH",
+      body: JSON.stringify({ title: title.trim() }),
+    });
+    if (state.sessionId === item.id) {
+      $("#journey-title").textContent = title.trim() + " · 历史会话";
+    }
+    await loadSessionHistory();
+  }
+
+  async function archiveSession(item) {
+    await requestJson("/v1/sessions/" + item.id, {
+      method: "PATCH",
+      body: JSON.stringify({ archived: item.status !== "ARCHIVED" }),
+    });
+    await loadSessionHistory();
+  }
+
+  async function deleteSession(item) {
+    if (!window.confirm("确定永久删除“" + (item.title || "未命名旅行") + "”及其消息和 Run 吗？")) {
+      return;
+    }
+    await requestJson("/v1/sessions/" + item.id, { method: "DELETE" });
+    if (state.sessionId === item.id) {
+      if (state.eventSource) state.eventSource.close();
+      state.sessionId = null;
+      state.runId = null;
+      $("#workspace").classList.add("is-idle");
+    }
+    await loadSessionHistory();
   }
 
   $("#planner-form").addEventListener("submit", submitJourney);
@@ -878,6 +1091,25 @@
     } else {
       openAuthDialog();
     }
+  });
+  $("#history-button").addEventListener("click", async () => {
+    await loadSessionHistory();
+    openHistoryDialog();
+  });
+  $("#history-close").addEventListener("click", closeHistoryDialog);
+  $("#history-archived").addEventListener("change", () => {
+    state.historyPage = 1;
+    loadSessionHistory();
+  });
+  $("#history-previous").addEventListener("click", () => {
+    if (state.historyPage <= 1) return;
+    state.historyPage -= 1;
+    loadSessionHistory();
+  });
+  $("#history-next").addEventListener("click", () => {
+    if (state.historyPage * state.historyPageSize >= state.historyTotal) return;
+    state.historyPage += 1;
+    loadSessionHistory();
   });
   renderWarnings();
   renderSources();

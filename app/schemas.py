@@ -6,12 +6,17 @@ from datetime import datetime
 from typing import Any
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class AuthCredentials(BaseModel):
+class RegisterCredentials(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=12, max_length=128)
+
+
+class LoginCredentials(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=128)
 
 
 class UserResponse(BaseModel):
@@ -38,6 +43,31 @@ class SessionResponse(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+
+
+class SessionUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    archived: bool | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> "SessionUpdate":
+        if self.title is None and self.archived is None:
+            raise ValueError("至少提供 title 或 archived")
+        return self
+
+
+class SessionListItem(SessionResponse):
+    recent_message_preview: str | None = None
+    message_count: int = 0
+    last_run_id: uuid.UUID | None = None
+    last_run_status: str | None = None
+
+
+class SessionListResponse(BaseModel):
+    items: list[SessionListItem]
+    total: int
+    page: int
+    page_size: int
 
 
 class MessageCreate(BaseModel):

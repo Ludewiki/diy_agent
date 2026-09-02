@@ -42,6 +42,9 @@ flowchart LR
 - 实时展示本次 Run 使用的历史消息数、滚动摘要状态和估算 Token 占用；
 - Leaflet + OpenStreetMap 展示每日景点顺序，无外网或 Leaflet 不可用时降级到原生 SVG 坐标路线；
 - 展示 Wikivoyage 来源、Open-Meteo/ORS 使用状态、风险提示与最终 Agent 行程。
+- 展示当前用户的分页历史 Session、最近消息和最后 Run 状态；
+- 支持重命名、归档、恢复归档与永久删除，选择会话时加载消息时间线；
+- 页面刷新后自动恢复最近会话，并通过持久化 SSE 回放重建天气、路线与最终结果。
 
 Tool 输出不会原样推送到浏览器。后端只对白名单字段生成展示快照，未知 Tool 默认不暴露任何结果；动态上游文本使用 DOM `textContent` 渲染，不作为 HTML 注入。
 
@@ -55,7 +58,7 @@ Web 页面提供注册、登录和退出入口。密码使用 Argon2id 哈希；
 - 浏览器发送 `Origin` 时必须是当前同源地址或 `CSRF_TRUSTED_ORIGINS` 中的明确来源；
 - SSE 使用同源 `EventSource`，HttpOnly Cookie 自动随请求发送，不需要把令牌暴露给 JavaScript。
 
-认证 API 为 `GET /v1/auth/csrf`、`POST /v1/auth/register`、`POST /v1/auth/login`、`GET /v1/auth/me` 和 `POST /v1/auth/logout`。此外，`GET /v1/sessions` 只返回当前用户的历史 Session，为后续历史会话页面和长期记忆提供安全的数据边界。
+认证 API 为 `GET /v1/auth/csrf`、`POST /v1/auth/register`、`POST /v1/auth/login`、`GET /v1/auth/me` 和 `POST /v1/auth/logout`。`GET /v1/sessions` 返回当前用户的分页历史 Session，并包含消息预览、消息数、最后 Run ID 和状态；`PATCH /v1/sessions/{id}` 用于重命名或归档，`DELETE /v1/sessions/{id}` 永久删除整个会话。
 
 ![Web 产品入口](docs/images/web-product.png)
 
@@ -68,6 +71,7 @@ Web 页面提供注册、登录和退出入口。密码使用 Argon2id 哈希；
 | `weather_window.py` | 显式 Agent/CLI 入口，导入时不会调用模型或网络 |
 | `app/main.py` | FastAPI 路由、同步接口、Run API 和 SSE |
 | `app/auth.py` | Argon2 密码校验、不透明 AuthSession、Cookie Token 摘要 |
+| `app/demo_seed.py` | 显式启用的本地演示用户与 legacy Session 绑定 |
 | `app/models.py` | SQLAlchemy User、AuthSession、Agent Session、Message、Run、Event 模型 |
 | `app/store.py` | 事务、任务领取、租约、重试、取消和事件持久化 |
 | `app/context.py` | Token 估算、最近历史窗口与幂等滚动摘要 |
@@ -79,7 +83,7 @@ Web 页面提供注册、登录和退出入口。密码使用 Argon2id 哈希；
 | `benchmarks/` | PostgreSQL 并发、Exactly-once 和租约回收基准 |
 | `tests/` | 离线单元测试和 PostgreSQL 集成测试 |
 
-架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md)、[ADR 0005](docs/adr/0005-container-runtime-and-ci.md)、[ADR 0006](docs/adr/0006-opentelemetry-and-runtime-benchmark.md)、[ADR 0007](docs/adr/0007-web-product-entry.md)、[ADR 0008](docs/adr/0008-multi-turn-context-and-short-term-memory.md) 和 [ADR 0009](docs/adr/0009-browser-auth-and-tenant-isolation.md)。
+架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md)、[ADR 0005](docs/adr/0005-container-runtime-and-ci.md)、[ADR 0006](docs/adr/0006-opentelemetry-and-runtime-benchmark.md)、[ADR 0007](docs/adr/0007-web-product-entry.md)、[ADR 0008](docs/adr/0008-multi-turn-context-and-short-term-memory.md)、[ADR 0009](docs/adr/0009-browser-auth-and-tenant-isolation.md) 和 [ADR 0010](docs/adr/0010-session-history-and-local-demo-data.md)。
 
 ## Docker Compose 一键启动
 
@@ -91,12 +95,13 @@ docker compose up -d --build --wait
 docker compose ps -a
 ```
 
-Compose 使用同一个非 root 应用镜像承担三个角色，并按依赖顺序启动：
+Compose 使用同一个非 root 应用镜像承担 API、Worker、迁移和本地数据初始化角色，并按依赖顺序启动：
 
 | 服务 | 生命周期与职责 |
 | --- | --- |
 | `postgres` | 长期运行；持久化会话、任务和 SSE 事件 |
 | `migration` | 一次性运行；数据库健康后执行 `alembic upgrade head`，成功退出后才放行应用 |
+| `demo-seed` | 一次性运行；仅在本地开关启用时选择演示用户并绑定 legacy Session |
 | `api` | 长期运行；提供 FastAPI、OpenAPI 和健康检查 |
 | `worker` | 长期运行；领取任务、续租、重试并写入进度事件 |
 | `otel-collector` | 接收 API/Worker 的 OTLP Trace 与 Metrics，并分别转发 |
@@ -111,6 +116,8 @@ docker compose logs -f api worker
 ```
 
 `DATABASE_URL` 在宿主机仍使用 `localhost`；Compose 会为容器内的 API、Worker 和 migration 自动改用服务名 `postgres`。生产部署必须通过 Secret 管理注入密码和 API Key，不能沿用模板中的开发密码。
+
+本地 Compose 默认设置 `DEMO_USER_ENABLED=true`。初始化服务优先选择创建时间最早的、处于启用状态的 `@163.com` 用户，并将 0004 迁移保留在禁用 legacy 用户下的历史 Session 绑定给该用户。只有找不到 163 用户和已有 `admin@admin.com` 时，才创建 `admin@admin.com / 123456`。这是弱口令本地演示账号，生产环境必须设置 `DEMO_USER_ENABLED=false`，并且不能部署该初始化服务。
 
 如果页面通过反向代理部署在 HTTPS 域名下，还必须将该完整 Origin 写入 `CSRF_TRUSTED_ORIGINS`，并设置 `AUTH_COOKIE_SECURE=true`。不要把认证 Cookie 改成可由 JavaScript 读取，也不要将 Session Token 或 JWT 放入 `localStorage`。
 

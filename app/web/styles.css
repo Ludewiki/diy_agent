@@ -160,6 +160,179 @@ footer {
   transform: translate(-50%, -50%);
 }
 
+.history-dialog {
+  width: min(620px, calc(100% - 30px));
+  max-height: min(820px, calc(100vh - 30px));
+  padding: 0;
+  color: var(--ink);
+  border: 0;
+  border-radius: 28px;
+  background: transparent;
+  box-shadow: var(--shadow);
+}
+
+.history-dialog::backdrop {
+  background: rgba(11, 28, 23, 0.48);
+  backdrop-filter: blur(8px);
+}
+
+.history-card {
+  max-height: min(820px, calc(100vh - 30px));
+  padding: 34px;
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 28px;
+  background: #f7f5ef;
+}
+
+.history-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.history-heading h2 {
+  margin: 8px 0 4px;
+  font: 400 38px/1.1 Georgia, "Songti SC", serif;
+}
+
+.history-heading p:not(.step-label) {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.history-filter {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 24px 0 15px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.history-list {
+  display: grid;
+  gap: 11px;
+}
+
+.history-item {
+  padding: 17px;
+  border: 1px solid var(--line);
+  border-radius: 17px;
+  background: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  transition: transform 160ms ease, border-color 160ms ease;
+}
+
+.history-item:hover {
+  transform: translateY(-2px);
+  border-color: rgba(22, 79, 66, 0.35);
+}
+
+.history-item.is-current {
+  border-color: var(--forest);
+  box-shadow: inset 3px 0 0 var(--forest);
+}
+
+.history-item-top,
+.history-item-meta,
+.history-actions,
+.history-pagination {
+  display: flex;
+  align-items: center;
+}
+
+.history-item-top {
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.history-item h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.history-item p {
+  margin: 9px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.history-item-meta {
+  gap: 10px;
+  color: #7c8781;
+  font-size: 10px;
+}
+
+.history-run-status {
+  padding: 4px 8px;
+  color: var(--forest);
+  border-radius: 999px;
+  background: var(--mint);
+  font-size: 9px;
+}
+
+.history-actions {
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.history-actions button,
+.history-pagination button {
+  padding: 7px 10px;
+  color: var(--forest);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.history-actions button:last-child {
+  color: var(--danger);
+}
+
+.history-timeline {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.history-message {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: 13px;
+  background: rgba(201, 223, 213, 0.35);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.history-message.is-assistant {
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.history-message strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--forest);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
+
+.history-pagination {
+  justify-content: space-between;
+  margin-top: 20px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.history-pagination button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
 .auth-card {
   padding: 36px;
   border: 1px solid rgba(255, 255, 255, 0.7);

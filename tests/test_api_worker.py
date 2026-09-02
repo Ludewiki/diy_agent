@@ -76,7 +76,8 @@ def test_product_page_and_assets_are_served(client: TestClient) -> None:
     assert 'id="planner-form"' in page.text
     assert 'id="weather-candidates"' in page.text
     assert 'id="map"' in page.text
-    assert "/static/app.js?v=20260902-auth" in page.text
+    assert "/static/app.js?v=20260902-history" in page.text
+    assert 'id="history-dialog"' in page.text
     assert page.headers["cache-control"] == "no-cache"
     script = client.get("/static/app.js")
     assert script.status_code == 200

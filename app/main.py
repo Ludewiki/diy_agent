@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from opentelemetry import trace
 
 from logging_config import configure_logging
@@ -32,21 +32,27 @@ from .models import (
     AgentSession,
     Message,
     RunStatus,
+    SessionStatus,
     TERMINAL_RUN_STATUSES,
     User,
+    utc_now,
 )
 from .schemas import (
-    AuthCredentials,
     CsrfResponse,
     HealthResponse,
     InvokeRequest,
     InvokeResponse,
+    LoginCredentials,
     MessageCreate,
     MessageResponse,
     QueuedRunResponse,
+    RegisterCredentials,
     RunResponse,
     SessionCreate,
+    SessionListItem,
+    SessionListResponse,
     SessionResponse,
+    SessionUpdate,
     UserResponse,
 )
 from .store import (
@@ -139,7 +145,7 @@ def create_app(
 
     application = FastAPI(
         title="Weather-aware Travel Planner Agent API",
-        version="0.7.0",
+        version="0.8.0",
         description="Web 产品入口、PostgreSQL 会话、租约 Worker、重试与 SSE 进度事件。",
         lifespan=lifespan,
     )
@@ -150,7 +156,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=list(runtime_settings.cors_origins),
         allow_credentials=True,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=[
             "Content-Type",
             "Last-Event-ID",
@@ -298,7 +304,7 @@ def create_app(
         tags=["auth"],
         dependencies=[Depends(require_csrf)],
     )
-    def register(payload: AuthCredentials, response: Response) -> User:
+    def register(payload: RegisterCredentials, response: Response) -> User:
         user, raw_token = auth_service.register(payload.email, payload.password)
         set_auth_cookie(response, raw_token)
         return user
@@ -309,7 +315,7 @@ def create_app(
         tags=["auth"],
         dependencies=[Depends(require_csrf)],
     )
-    def login(payload: AuthCredentials, response: Response) -> User:
+    def login(payload: LoginCredentials, response: Response) -> User:
         user, raw_token = auth_service.login(payload.email, payload.password)
         set_auth_cookie(response, raw_token)
         return user
@@ -401,17 +407,92 @@ def create_app(
 
     @application.get(
         "/v1/sessions",
-        response_model=list[SessionResponse],
+        response_model=SessionListResponse,
         tags=["sessions"],
     )
-    def list_sessions(user: User = Depends(current_user)) -> list[AgentSession]:
+    def list_sessions(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=50),
+        include_archived: bool = Query(default=False),
+        user: User = Depends(current_user),
+    ) -> SessionListResponse:
         with runtime_database.session_factory() as session:
-            return list(
-                session.scalars(
-                    select(AgentSession)
-                    .where(AgentSession.user_id == user.id)
-                    .order_by(AgentSession.updated_at.desc(), AgentSession.id)
+            filters = [AgentSession.user_id == user.id]
+            if not include_archived:
+                filters.append(
+                    AgentSession.status == SessionStatus.ACTIVE.value
                 )
+
+            recent_message = (
+                select(Message.content)
+                .where(Message.session_id == AgentSession.id)
+                .order_by(Message.created_at.desc(), Message.id.desc())
+                .limit(1)
+                .correlate(AgentSession)
+                .scalar_subquery()
+            )
+            message_count = (
+                select(func.count(Message.id))
+                .where(Message.session_id == AgentSession.id)
+                .correlate(AgentSession)
+                .scalar_subquery()
+            )
+            latest_run_id = (
+                select(AgentRun.id)
+                .where(AgentRun.session_id == AgentSession.id)
+                .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+                .limit(1)
+                .correlate(AgentSession)
+                .scalar_subquery()
+            )
+            latest_run_status = (
+                select(AgentRun.status)
+                .where(AgentRun.session_id == AgentSession.id)
+                .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+                .limit(1)
+                .correlate(AgentSession)
+                .scalar_subquery()
+            )
+            total = int(
+                session.scalar(
+                    select(func.count(AgentSession.id)).where(*filters)
+                )
+                or 0
+            )
+            rows = session.execute(
+                select(
+                    AgentSession,
+                    recent_message.label("recent_message"),
+                    message_count.label("message_count"),
+                    latest_run_id.label("latest_run_id"),
+                    latest_run_status.label("latest_run_status"),
+                )
+                .where(*filters)
+                .order_by(AgentSession.updated_at.desc(), AgentSession.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            ).all()
+            items = [
+                SessionListItem(
+                    id=conversation.id,
+                    title=conversation.title,
+                    status=conversation.status,
+                    created_at=conversation.created_at,
+                    updated_at=conversation.updated_at,
+                    recent_message_preview=(
+                        str(preview)[:160] if preview is not None else None
+                    ),
+                    message_count=int(count or 0),
+                    last_run_id=run_id,
+                    last_run_status=run_status,
+                )
+                for conversation, preview, count, run_id, run_status in rows
+            ]
+            return SessionListResponse(
+                items=items,
+                total=total,
+                page=page,
+                page_size=page_size,
             )
 
     @application.get(
@@ -433,6 +514,60 @@ def create_app(
             if conversation is None:
                 raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在。")
             return conversation
+
+    @application.patch(
+        "/v1/sessions/{session_id}",
+        response_model=SessionResponse,
+        tags=["sessions"],
+    )
+    def update_session(
+        session_id: uuid.UUID,
+        payload: SessionUpdate,
+        user: User = Depends(current_user),
+        _csrf: None = Depends(require_csrf),
+    ) -> AgentSession:
+        with runtime_database.session_factory.begin() as session:
+            conversation = session.scalar(
+                select(AgentSession).where(
+                    AgentSession.id == session_id,
+                    AgentSession.user_id == user.id,
+                )
+            )
+            if conversation is None:
+                raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在。")
+            if payload.title is not None:
+                conversation.title = payload.title.strip()
+            if payload.archived is not None:
+                conversation.status = (
+                    SessionStatus.ARCHIVED.value
+                    if payload.archived
+                    else SessionStatus.ACTIVE.value
+                )
+            conversation.updated_at = utc_now()
+            session.flush()
+            return conversation
+
+    @application.delete(
+        "/v1/sessions/{session_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["sessions"],
+    )
+    def delete_session(
+        session_id: uuid.UUID,
+        user: User = Depends(current_user),
+        _csrf: None = Depends(require_csrf),
+    ) -> Response:
+        with runtime_database.session_factory.begin() as session:
+            conversation = session.scalar(
+                select(AgentSession).where(
+                    AgentSession.id == session_id,
+                    AgentSession.user_id == user.id,
+                )
+            )
+            if conversation is None:
+                raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在。")
+            session.delete(conversation)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @application.get(
         "/v1/sessions/{session_id}/messages",

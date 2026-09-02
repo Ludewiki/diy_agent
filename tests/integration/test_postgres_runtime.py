@@ -6,11 +6,14 @@ import uuid
 
 from alembic import command
 from alembic.config import Config
+from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 
+from app.config import Settings
 from app.database import Database
+from app.main import create_app
 from app.models import AgentRun, AgentSession, RunEvent, User
 from app.store import claim_next_run, complete_run, enqueue_message
 
@@ -115,3 +118,62 @@ def test_migration_and_concurrent_worker_claims(
         event_count = len(list(session.scalars(select(RunEvent.id))))
     assert all(output == {"answer": "ok", "reference": [{"title": "source"}]} for output in outputs)
     assert event_count == 6
+
+
+@pytest.mark.postgres
+@pytest.mark.integration
+def test_postgres_session_history_and_lifecycle(
+    postgres_database: Database,
+) -> None:
+    app = create_app(
+        database=postgres_database,
+        settings=Settings(database_url=postgres_database.url),
+        sync_runner=lambda prompt: {"answer": prompt, "reference": []},
+    )
+    with TestClient(app) as client:
+        csrf = client.get("/v1/auth/csrf").json()["csrf_token"]
+        registered = client.post(
+            "/v1/auth/register",
+            json={
+                "email": "postgres-history@example.com",
+                "password": "correct-horse-battery-staple",
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert registered.status_code == 201
+        client.headers.update({"X-CSRF-Token": csrf})
+
+        first = client.post("/v1/sessions", json={"title": "first"}).json()
+        second = client.post("/v1/sessions", json={"title": "second"}).json()
+        queued = client.post(
+            f"/v1/sessions/{first['id']}/messages",
+            json={"content": "postgres preview"},
+        )
+        assert queued.status_code == 202
+
+        history = client.get("/v1/sessions?page=1&page_size=1").json()
+        assert history["total"] == 2
+        assert len(history["items"]) == 1
+        first_page_id = history["items"][0]["id"]
+        assert first_page_id in {first["id"], second["id"]}
+
+        renamed = client.patch(
+            f"/v1/sessions/{first['id']}",
+            json={"title": "renamed"},
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["title"] == "renamed"
+
+        archived = client.patch(
+            f"/v1/sessions/{second['id']}",
+            json={"archived": True},
+        )
+        assert archived.status_code == 200
+        assert client.get("/v1/sessions").json()["total"] == 1
+        assert (
+            client.get("/v1/sessions?include_archived=true").json()["total"]
+            == 2
+        )
+
+        assert client.delete(f"/v1/sessions/{first['id']}").status_code == 204
+        assert client.get(f"/v1/sessions/{first['id']}").status_code == 404

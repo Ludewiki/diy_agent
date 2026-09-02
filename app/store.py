@@ -423,6 +423,9 @@ def complete_run(
         )
         session.add(assistant)
         session.flush()
+        conversation = session.get(AgentSession, run.session_id)
+        if conversation is not None:
+            conversation.updated_at = utc_now()
         run.assistant_message_id = assistant.id
         run.output_json = output
         run.status = RunStatus.SUCCEEDED.value

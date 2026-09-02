@@ -28,6 +28,7 @@ x-runtime-environment: &runtime-environment
   AUTH_SESSION_LIFETIME_DAYS: ${AUTH_SESSION_LIFETIME_DAYS:-7}
   AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
   CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
+  DEMO_USER_ENABLED: ${DEMO_USER_ENABLED:-true}
   OTEL_ENABLED: ${OTEL_ENABLED:-true}
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
   OTEL_METRIC_EXPORT_INTERVAL_MS: ${OTEL_METRIC_EXPORT_INTERVAL_MS:-5000}
@@ -106,11 +107,21 @@ services:
         condition: service_healthy
     restart: "no"
 
+  demo-seed:
+    <<: *app-service
+    command: ["python", "-m", "app.demo_seed"]
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    restart: "no"
+
   api:
     <<: *app-service
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
       migration:
+        condition: service_completed_successfully
+      demo-seed:
         condition: service_completed_successfully
       otel-collector:
         condition: service_started
@@ -133,6 +144,8 @@ services:
     command: ["python", "-m", "app.worker"]
     depends_on:
       migration:
+        condition: service_completed_successfully
+      demo-seed:
         condition: service_completed_successfully
       otel-collector:
         condition: service_started

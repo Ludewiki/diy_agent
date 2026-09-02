@@ -130,10 +130,80 @@ def test_user_cannot_access_another_users_sessions_runs_or_sse(app) -> None:
         assert bob.get(f"/v1/runs/{run_id}").status_code == 404
         assert bob.post(f"/v1/runs/{run_id}/cancel").status_code == 404
         assert bob.get(f"/v1/runs/{run_id}/events").status_code == 404
-        assert bob.get("/v1/sessions").json() == []
+        assert bob.get("/v1/sessions").json() == {
+            "items": [],
+            "total": 0,
+            "page": 1,
+            "page_size": 20,
+        }
 
         assert alice.get(f"/v1/sessions/{session_id}").status_code == 200
         assert alice.get(f"/v1/runs/{run_id}").status_code == 200
+
+
+def test_session_history_metadata_pagination_and_lifecycle(app) -> None:
+    with TestClient(app) as client:
+        _register(client, "history@example.com")
+        session_id, run_id = _create_run(client)
+
+        history = client.get("/v1/sessions?page=1&page_size=1").json()
+        assert history["total"] == 1
+        assert history["page"] == 1
+        assert history["page_size"] == 1
+        item = history["items"][0]
+        assert item["id"] == session_id
+        assert item["recent_message_preview"] == "plan my private trip"
+        assert item["message_count"] == 1
+        assert item["last_run_id"] == run_id
+        assert item["last_run_status"] == "PENDING"
+
+        renamed = client.patch(
+            f"/v1/sessions/{session_id}",
+            json={"title": "renamed journey"},
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["title"] == "renamed journey"
+
+        archived = client.patch(
+            f"/v1/sessions/{session_id}",
+            json={"archived": True},
+        )
+        assert archived.status_code == 200
+        assert archived.json()["status"] == "ARCHIVED"
+        assert client.get("/v1/sessions").json()["total"] == 0
+        all_sessions = client.get(
+            "/v1/sessions?include_archived=true"
+        ).json()
+        assert all_sessions["total"] == 1
+        assert all_sessions["items"][0]["status"] == "ARCHIVED"
+
+        deleted = client.delete(f"/v1/sessions/{session_id}")
+        assert deleted.status_code == 204
+        assert client.get(f"/v1/sessions/{session_id}").status_code == 404
+
+
+def test_other_user_cannot_rename_archive_or_delete_session(app) -> None:
+    with TestClient(app) as owner, TestClient(app) as attacker:
+        _register(owner, "owner@example.com")
+        _register(attacker, "attacker@example.com")
+        session_id, _ = _create_run(owner)
+
+        assert (
+            attacker.patch(
+                f"/v1/sessions/{session_id}",
+                json={"title": "stolen"},
+            ).status_code
+            == 404
+        )
+        assert (
+            attacker.patch(
+                f"/v1/sessions/{session_id}",
+                json={"archived": True},
+            ).status_code
+            == 404
+        )
+        assert attacker.delete(f"/v1/sessions/{session_id}").status_code == 404
+        assert owner.get(f"/v1/sessions/{session_id}").status_code == 200
 
 
 def test_logout_revokes_the_server_side_session(app) -> None:

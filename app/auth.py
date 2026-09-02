@@ -36,6 +36,10 @@ def hash_session_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def hash_password(password: str) -> str:
+    return _PASSWORD_HASHER.hash(password)
+
+
 class AuthService:
     def __init__(self, database: Database, settings: Settings) -> None:
         self.database = database
@@ -44,7 +48,7 @@ class AuthService:
     def register(self, email: str, password: str) -> tuple[User, str]:
         user = User(
             email=normalize_email(email),
-            password_hash=_PASSWORD_HASHER.hash(password),
+            password_hash=hash_password(password),
         )
         try:
             with self.database.session_factory.begin() as session:

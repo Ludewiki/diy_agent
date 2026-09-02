@@ -13,14 +13,14 @@
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
       crossorigin=""
     >
-    <link rel="stylesheet" href="/static/styles.css?v=20260902-auth">
+    <link rel="stylesheet" href="/static/styles.css?v=20260902-history">
     <script
       src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
       integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
       crossorigin=""
       defer
     ></script>
-    <script src="/static/app.js?v=20260902-auth" defer></script>
+    <script src="/static/app.js?v=20260902-history" defer></script>
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
@@ -36,6 +36,7 @@
         <span class="live-dot" aria-hidden="true"></span>
         <span>Weather-aware agent</span>
         <a href="/docs" target="_blank" rel="noreferrer">API</a>
+        <button id="history-button" class="account-button is-hidden" type="button">历史会话</button>
         <button id="account-button" class="account-button" type="button">
           <span id="account-label">登录</span>
         </button>
@@ -68,6 +69,30 @@
         <button id="auth-mode" class="auth-mode" type="button">还没有账号？创建账号</button>
         <p class="auth-security">使用服务端会话与 HttpOnly Cookie；浏览器不会把登录令牌写入 localStorage。</p>
       </form>
+    </dialog>
+
+    <dialog id="history-dialog" class="history-dialog" aria-labelledby="history-title">
+      <section class="history-card">
+        <div class="history-heading">
+          <div>
+            <p class="step-label">YOUR JOURNEY ARCHIVE</p>
+            <h2 id="history-title">历史会话</h2>
+            <p id="history-summary">正在读取你的旅行记录</p>
+          </div>
+          <button id="history-close" class="dialog-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <label class="history-filter">
+          <input id="history-archived" type="checkbox">
+          <span>显示已归档会话</span>
+        </label>
+        <div id="history-list" class="history-list"></div>
+        <div id="history-timeline" class="history-timeline is-hidden"></div>
+        <nav class="history-pagination" aria-label="历史会话分页">
+          <button id="history-previous" type="button">上一页</button>
+          <span id="history-page">第 1 页</span>
+          <button id="history-next" type="button">下一页</button>
+        </nav>
+      </section>
     </dialog>
 
     <main>

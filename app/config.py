@@ -53,6 +53,7 @@ class Settings:
     csrf_cookie_name: str = "diy_agent_csrf"
     auth_session_lifetime_days: int = 7
     auth_cookie_secure: bool = False
+    demo_user_enabled: bool = False
     csrf_trusted_origins: tuple[str, ...] = (
         "http://localhost:8000",
         "http://127.0.0.1:8000",
@@ -179,5 +180,6 @@ class Settings:
                 os.getenv("AUTH_SESSION_LIFETIME_DAYS", "7")
             ),
             auth_cookie_secure=_environment_bool("AUTH_COOKIE_SECURE", False),
+            demo_user_enabled=_environment_bool("DEMO_USER_ENABLED", False),
             csrf_trusted_origins=trusted_origins,
         )
