@@ -13,14 +13,14 @@
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
       crossorigin=""
     >
-    <link rel="stylesheet" href="/static/styles.css?v=20260902-history">
+    <link rel="stylesheet" href="/static/styles.css?v=20260903-workbench">
     <script
       src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
       integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
       crossorigin=""
       defer
     ></script>
-    <script src="/static/app.js?v=20260902-history" defer></script>
+    <script src="/static/app.js?v=20260903-workbench" defer></script>
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
@@ -205,6 +205,99 @@
           <span id="error-message"></span>
         </div>
 
+        <div class="workbench-grid">
+          <aside class="session-rail" aria-label="旅行会话">
+            <div class="rail-heading">
+              <div>
+                <p class="section-kicker">JOURNEYS</p>
+                <h3>旅行会话</h3>
+              </div>
+              <button id="new-journey-button" class="rail-new-button" type="button" aria-label="新建旅行">＋</button>
+            </div>
+            <div id="workspace-session-list" class="workspace-session-list">
+              <p class="rail-empty">登录后，你的近期会话会显示在这里。</p>
+            </div>
+            <button id="manage-sessions-button" class="rail-manage-button" type="button">管理全部会话</button>
+          </aside>
+
+          <section class="conversation-panel" aria-labelledby="conversation-title">
+            <div class="conversation-heading">
+              <div>
+                <p class="section-kicker">CONVERSATION</p>
+                <h3 id="conversation-title">与旅行 Agent 继续讨论</h3>
+              </div>
+              <span id="conversation-memory" class="memory-chip">同一 Session</span>
+            </div>
+
+            <div id="conversation-list" class="conversation-list" role="log" aria-live="polite">
+              <div class="conversation-empty">
+                <strong>先创建一次旅行规划</strong>
+                <span>完成后可在这里继续追问、调整局部行程，并复用本次会话上下文。</span>
+              </div>
+            </div>
+
+            <div class="prompt-suggestions" aria-label="追问示例">
+              <button type="button" data-follow-up="把第二天改成室内景点，其他安排保持不变。">第二天改为室内</button>
+              <button type="button" data-follow-up="不要早起，每天十点后出发，并说明调整了哪些安排。">每天十点后出发</button>
+              <button type="button" data-follow-up="上一版预算太高，请改成经济型方案。">降低预算</button>
+              <button type="button" data-follow-up="为什么选择这三天？请结合天气评分解释。">解释日期选择</button>
+            </div>
+
+            <form id="follow-up-form" class="follow-up-form">
+              <label for="follow-up-input">继续追问或修改行程</label>
+              <textarea
+                id="follow-up-input"
+                name="message"
+                rows="3"
+                maxlength="20000"
+                placeholder="例如：保留第一天，只重新规划后两天。"
+                disabled
+              ></textarea>
+              <div class="composer-footer">
+                <span id="composer-hint">选择一个历史 Session，或先创建新旅行</span>
+                <button id="follow-up-submit" type="submit" disabled>
+                  <span>发送追问</span>
+                  <span aria-hidden="true">↗</span>
+                </button>
+              </div>
+            </form>
+
+            <section class="progress-panel conversation-runtime">
+              <div class="section-heading compact">
+                <div>
+                  <span class="section-number">02</span>
+                  <div>
+                    <p class="section-kicker">AGENT RUNTIME</p>
+                    <h3>实时执行进度</h3>
+                  </div>
+                </div>
+              </div>
+              <ol id="progress-list" class="progress-list">
+                <li data-stage="queued"><i></i><div><strong>创建任务</strong><span>等待提交</span></div></li>
+                <li data-stage="weather"><i></i><div><strong>筛选天气</strong><span>Open-Meteo</span></div></li>
+                <li data-stage="guide"><i></i><div><strong>提取攻略</strong><span>Wikivoyage</span></div></li>
+                <li data-stage="route"><i></i><div><strong>计算路线</strong><span>OpenRouteService</span></div></li>
+                <li data-stage="complete"><i></i><div><strong>组织最终行程</strong><span>等待 Agent</span></div></li>
+              </ol>
+              <div class="context-budget" aria-label="Agent 上下文预算">
+                <div>
+                  <span>CONTEXT</span>
+                  <strong id="context-tokens">0 / 12,000 tokens</strong>
+                </div>
+                <div class="context-budget-meta">
+                  <span id="context-history">历史 0 条</span>
+                  <span id="context-summary">摘要未使用</span>
+                </div>
+              </div>
+              <div class="trace-box">
+                <span>TRACE</span>
+                <code id="trace-id">—</code>
+              </div>
+            </section>
+          </section>
+
+          <div class="journey-output">
+
         <section class="weather-section">
           <div class="section-heading">
             <div>
@@ -235,40 +328,7 @@
           </div>
         </section>
 
-        <div class="planning-grid">
-          <section class="progress-panel">
-            <div class="section-heading compact">
-              <div>
-                <span class="section-number">02</span>
-                <div>
-                  <p class="section-kicker">AGENT RUNTIME</p>
-                  <h3>实时执行进度</h3>
-                </div>
-              </div>
-            </div>
-            <ol id="progress-list" class="progress-list">
-              <li data-stage="queued"><i></i><div><strong>创建任务</strong><span>等待提交</span></div></li>
-              <li data-stage="weather"><i></i><div><strong>筛选天气</strong><span>Open-Meteo</span></div></li>
-              <li data-stage="guide"><i></i><div><strong>提取攻略</strong><span>Wikivoyage</span></div></li>
-              <li data-stage="route"><i></i><div><strong>计算路线</strong><span>OpenRouteService</span></div></li>
-              <li data-stage="complete"><i></i><div><strong>组织最终行程</strong><span>等待 Agent</span></div></li>
-            </ol>
-            <div class="context-budget" aria-label="Agent 上下文预算">
-              <div>
-                <span>CONTEXT</span>
-                <strong id="context-tokens">0 / 12,000 tokens</strong>
-              </div>
-              <div class="context-budget-meta">
-                <span id="context-history">历史 0 条</span>
-                <span id="context-summary">摘要未使用</span>
-              </div>
-            </div>
-            <div class="trace-box">
-              <span>TRACE</span>
-              <code id="trace-id">—</code>
-            </div>
-          </section>
-
+        <div class="planning-grid route-only">
           <section class="map-panel">
             <div class="map-heading">
               <div>
@@ -347,6 +407,8 @@
           </div>
           <div id="final-answer" class="final-answer"></div>
         </section>
+          </div>
+        </div>
       </section>
     </main>
 

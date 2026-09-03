@@ -37,12 +37,14 @@ flowchart LR
 启动 Compose 后访问 `http://127.0.0.1:8000/`。页面不需要 Node 或前端构建工具，由 FastAPI 同源托管原生 HTML/CSS/JavaScript，提供：
 
 - 城市、旅行天数、兴趣、预算和补充偏好输入；
+- 首次规划后切换为三栏工作台：左侧近期 Session，中间多轮消息、Tool 进度与上下文预算，右侧或移动端下方展示天气、地图、路线和来源；
+- 支持在当前 Session 内发送最长 20,000 字的自由文本追问，例如局部调整某一天、降低预算或解释日期选择；追问继续调用 `POST /v1/sessions/{session_id}/messages`，不会创建新 Session；
 - 天气 Tool 返回后实时展示前三个连续候选日期；
 - 使用持久化 SSE Event 展示 Run、Agent 和 Tool 进度，断线后由服务端回放；
 - 实时展示本次 Run 使用的历史消息数、滚动摘要状态和估算 Token 占用；
 - Leaflet + OpenStreetMap 展示每日景点顺序，无外网或 Leaflet 不可用时降级到原生 SVG 坐标路线；
 - 展示 Wikivoyage 来源、Open-Meteo/ORS 使用状态、风险提示与最终 Agent 行程。
-- 展示当前用户的分页历史 Session、最近消息和最后 Run 状态；
+- 左侧展示当前用户的近期 Session；管理弹窗提供分页历史、最近消息和最后 Run 状态；
 - 支持重命名、归档、恢复归档与永久删除，选择会话时加载消息时间线；
 - 页面刷新后自动恢复最近会话，并通过持久化 SSE 回放重建天气、路线与最终结果。
 

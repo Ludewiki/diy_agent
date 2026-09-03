@@ -47,6 +47,8 @@
     historyTotal: 0,
     historyPageSize: 8,
     initialSessionRestored: false,
+    runActive: false,
+    sessionItems: [],
   };
 
   function parseDate(value) {
@@ -66,9 +68,32 @@
   }
 
   function setButtonRunning(running) {
+    state.runActive = running;
     const button = $("#submit-button");
     button.disabled = running;
     button.firstElementChild.textContent = running ? "Agent 正在规划…" : "生成我的旅行方案";
+    updateComposerState();
+  }
+
+  function updateComposerState() {
+    const canFollowUp = Boolean(state.user && state.sessionId && !state.runActive);
+    const input = $("#follow-up-input");
+    const submit = $("#follow-up-submit");
+    input.disabled = !canFollowUp;
+    submit.disabled = !canFollowUp;
+    $$("[data-follow-up]").forEach((button) => {
+      button.disabled = !canFollowUp;
+    });
+    if (state.runActive) {
+      $("#composer-hint").textContent = "当前 Run 执行中，完成后可继续追问";
+      submit.firstElementChild.textContent = "Agent 执行中…";
+    } else if (state.sessionId) {
+      $("#composer-hint").textContent = "消息会发送到当前 Session · Ctrl/⌘ + Enter";
+      submit.firstElementChild.textContent = "发送追问";
+    } else {
+      $("#composer-hint").textContent = "选择一个历史 Session，或先创建新旅行";
+      submit.firstElementChild.textContent = "发送追问";
+    }
   }
 
   function setStage(name, status, detail) {
@@ -139,6 +164,8 @@
     state.currentDay = 0;
     state.warnings = new Set(defaultWarnings);
     state.extraSources = [];
+    renderConversation([]);
+    updateComposerState();
     $("#workspace").classList.remove("is-idle");
     $("#journey-title").textContent = city + " · 正在生成";
     $("#run-reference").textContent = "RUN —";
@@ -175,6 +202,43 @@
       );
       container.append(card);
     }
+  }
+
+  function renderConversation(messages) {
+    const container = $("#conversation-list");
+    container.replaceChildren();
+    if (!messages.length) {
+      const empty = create("div", "conversation-empty");
+      empty.append(
+        create("strong", "", "先创建一次旅行规划"),
+        create("span", "", "完成后可在这里继续追问、调整局部行程，并复用本次会话上下文。")
+      );
+      container.append(empty);
+      $("#conversation-memory").textContent = "同一 Session";
+      return;
+    }
+    messages.forEach((message) => appendConversationMessage(message, false));
+    $("#conversation-memory").textContent = "短期记忆 · " + messages.length + " 条";
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function appendConversationMessage(message, pending = false) {
+    const container = $("#conversation-list");
+    const empty = container.querySelector(".conversation-empty");
+    if (empty) empty.remove();
+    const isUser = String(message.role || "").toUpperCase() === "USER";
+    const bubble = create(
+      "article",
+      "message-bubble " + (isUser ? "is-user" : "is-assistant") + (pending ? " is-pending" : "")
+    );
+    const heading = create("header");
+    heading.append(
+      create("strong", "", isUser ? "YOU" : "ATLAS"),
+      create("span", "", pending ? "发送中" : formatSessionTime(message.created_at))
+    );
+    bubble.append(heading, create("p", "", message.content || ""));
+    container.append(bubble);
+    container.scrollTop = container.scrollHeight;
   }
 
   async function requestJson(url, options) {
@@ -232,6 +296,7 @@
     }
     const formData = new FormData(event.currentTarget);
     const city = String(formData.get("city") || "").trim();
+    const prompt = buildPrompt(formData);
     if (!city) return;
     resetWorkspace(city);
     setButtonRunning(true);
@@ -249,7 +314,7 @@
         "/v1/sessions/" + state.sessionId + "/messages",
         {
           method: "POST",
-          body: JSON.stringify({ content: buildPrompt(formData) }),
+          body: JSON.stringify({ content: prompt }),
         }
       );
       state.runId = runResult.body.run.id;
@@ -257,12 +322,60 @@
       $("#run-reference").textContent = "RUN " + state.runId.slice(0, 8).toUpperCase();
       $("#trace-id").textContent = state.traceId || "等待 Trace";
       setStatus("Run 已入队", "running");
+      await loadMessageTimeline(state.sessionId);
       openEventStream(runResult.body.events_url);
       loadSessionHistory({ restoreLatest: false });
     } catch (error) {
       setStatus("提交失败", "error");
       setButtonRunning(false);
       showError(error.message);
+    }
+  }
+
+  async function submitFollowUp(event) {
+    event.preventDefault();
+    const input = $("#follow-up-input");
+    const content = input.value.trim();
+    if (!content || !state.sessionId || state.runActive) return;
+
+    if (state.eventSource) state.eventSource.close();
+    state.eventSource = null;
+    state.terminal = false;
+    state.runId = null;
+    state.traceId = null;
+    hideError();
+    resetProgress();
+    setStage("queued", "active", "正在把追问加入当前 Session");
+    setStatus("追问入队中", "running");
+    setButtonRunning(true);
+    input.value = "";
+    appendConversationMessage(
+      { role: "USER", content, created_at: new Date().toISOString() },
+      true
+    );
+
+    try {
+      const runResult = await requestJson(
+        "/v1/sessions/" + state.sessionId + "/messages",
+        {
+          method: "POST",
+          body: JSON.stringify({ content }),
+        }
+      );
+      state.runId = runResult.body.run.id;
+      state.traceId = runResult.response.headers.get("X-Trace-ID");
+      $("#run-reference").textContent = "RUN " + state.runId.slice(0, 8).toUpperCase();
+      $("#trace-id").textContent = state.traceId || "等待 Trace";
+      setStatus("追问已入队", "running");
+      await loadMessageTimeline(state.sessionId);
+      openEventStream(runResult.body.events_url);
+      loadSessionHistory({ restoreLatest: false });
+    } catch (error) {
+      input.value = content;
+      setStatus("追问失败", "error");
+      setButtonRunning(false);
+      showError(error.message);
+      await loadMessageTimeline(state.sessionId);
     }
   }
 
@@ -754,6 +867,7 @@
         $("#final-answer").textContent = run.output.answer || "Agent 已完成，但没有返回文字总结。";
         renderSources(run.output.reference || []);
       }
+      if (state.sessionId) await loadMessageTimeline(state.sessionId);
     } catch (error) {
       addWarning("最终 Run 查询失败：" + error.message);
     }
@@ -780,6 +894,7 @@
       $("#auth-close").classList.add("is-hidden");
       $("#history-button").classList.add("is-hidden");
     }
+    updateComposerState();
   }
 
   function setAuthMode(mode) {
@@ -849,8 +964,17 @@
     try {
       await requestJson("/v1/auth/logout", { method: "POST" });
     } finally {
+      if (state.eventSource) state.eventSource.close();
+      state.eventSource = null;
       state.user = null;
+      state.sessionId = null;
+      state.runId = null;
+      state.runActive = false;
       state.initialSessionRestored = false;
+      state.sessionItems = [];
+      renderWorkspaceSessions([]);
+      renderConversation([]);
+      $("#workspace").classList.add("is-idle");
       renderAuthState();
       try {
         await refreshCsrfToken();
@@ -923,7 +1047,9 @@
       );
       const data = result.body;
       state.historyTotal = Number(data.total || 0);
+      state.sessionItems = data.items || [];
       renderSessionHistory(data.items || []);
+      renderWorkspaceSessions((data.items || []).filter((item) => item.status !== "ARCHIVED"));
       $("#history-summary").textContent = "共 " + state.historyTotal + " 个会话";
       $("#history-page").textContent = "第 " + state.historyPage + " 页";
       $("#history-previous").disabled = state.historyPage <= 1;
@@ -997,6 +1123,32 @@
     });
   }
 
+  function renderWorkspaceSessions(items) {
+    const container = $("#workspace-session-list");
+    container.replaceChildren();
+    if (!items.length) {
+      container.append(create("p", "rail-empty", "还没有旅行会话。创建一次规划后，可以在这里随时继续讨论。"));
+      return;
+    }
+    items.slice(0, 8).forEach((item) => {
+      const button = create(
+        "button",
+        "workspace-session-item" + (item.id === state.sessionId ? " is-current" : "")
+      );
+      button.type = "button";
+      button.append(
+        create("strong", "", item.title || "未命名旅行"),
+        create(
+          "span",
+          "",
+          statusLabel(item.last_run_status) + " · " + Number(item.message_count || 0) + " 条消息"
+        )
+      );
+      button.addEventListener("click", () => restoreSession(item, { closeDialog: false }));
+      container.append(button);
+    });
+  }
+
   async function loadMessageTimeline(sessionId) {
     const timeline = $("#history-timeline");
     try {
@@ -1004,6 +1156,7 @@
         "/v1/sessions/" + sessionId + "/messages",
         { method: "GET" }
       );
+      renderConversation(result.body || []);
       timeline.replaceChildren();
       (result.body || []).slice(-12).forEach((message) => {
         const node = create(
@@ -1025,6 +1178,8 @@
   async function restoreSession(item, { closeDialog = true } = {}) {
     resetWorkspace(item.title || "历史旅行");
     state.sessionId = item.id;
+    renderWorkspaceSessions(state.sessionItems.filter((session) => session.status !== "ARCHIVED"));
+    updateComposerState();
     $("#journey-title").textContent = (item.title || "历史旅行") + " · 历史会话";
     await loadMessageTimeline(item.id);
     if (closeDialog) closeHistoryDialog();
@@ -1077,6 +1232,32 @@
   }
 
   $("#planner-form").addEventListener("submit", submitJourney);
+  $("#follow-up-form").addEventListener("submit", submitFollowUp);
+  $("#follow-up-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      $("#follow-up-form").requestSubmit();
+    }
+  });
+  $$("[data-follow-up]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const input = $("#follow-up-input");
+      input.value = button.dataset.followUp || "";
+      input.focus();
+    });
+  });
+  $("#new-journey-button").addEventListener("click", () => {
+    $("#planner-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    $("#city").focus();
+  });
+  $("#manage-sessions-button").addEventListener("click", async () => {
+    if (!state.user) {
+      openAuthDialog();
+      return;
+    }
+    await loadSessionHistory();
+    openHistoryDialog();
+  });
   $("#auth-form").addEventListener("submit", submitAuth);
   $("#auth-mode").addEventListener("click", () => {
     setAuthMode(state.authMode === "login" ? "register" : "login");
@@ -1113,5 +1294,6 @@
   });
   renderWarnings();
   renderSources();
+  updateComposerState();
   bootstrapAuth();
 })();
