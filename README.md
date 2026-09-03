@@ -30,7 +30,7 @@ flowchart LR
     OTEL --> PROM[Prometheus Metrics]
 ```
 
-请求流程：创建 Session → 提交 Message → 创建 `PENDING` Run → Worker 领取并执行 → 持久化进度事件 → 前端通过 SSE 接收进度 → 查询最终 Run。
+请求流程：创建 Session → 提交 Message → 创建带版本化快照的 `PENDING` Run → Worker 领取并执行 → 原子持久化 Tool 成果和进度事件 → 前端通过 SSE 接收状态并查询正式 Run 结果。
 
 ## Web 产品入口
 
@@ -46,9 +46,11 @@ flowchart LR
 - 展示 Wikivoyage 来源、Open-Meteo/ORS 使用状态、风险提示与最终 Agent 行程。
 - 左侧展示当前用户的近期 Session；管理弹窗提供分页历史、最近消息和最后 Run 状态；
 - 支持重命名、归档、恢复归档与永久删除，选择会话时加载消息时间线；
-- 页面刷新后自动恢复最近会话，并通过持久化 SSE 回放重建天气、路线与最终结果。
+- 页面刷新后自动恢复最近会话；SSE 仅恢复实时状态，天气、路线、来源、警告和最终回答统一从版本化 Run 结果恢复。
 
 Tool 输出不会原样推送到浏览器。后端只对白名单字段生成展示快照，未知 Tool 默认不暴露任何结果；动态上游文本使用 DOM `textContent` 渲染，不作为 HTML 注入。
+
+`GET /v1/runs/{run_id}` 的 `output` 使用 `RunResultV1`：包含请求快照、规划版本、Assistant 回答、天气、每日路线、结构化来源/警告、组件状态与 ContextUsage。Tool 完成时结果快照和 SSE 状态事件在同一事务写入；SSE 不携带 Tool 正文。失败 Run 保留已经完成的组件，旧版 `answer/reference` 在读取时自动转换为 V1。
 
 ## 鉴权与数据隔离
 
@@ -85,7 +87,7 @@ Web 页面提供注册、登录和退出入口。密码使用 Argon2id 哈希；
 | `benchmarks/` | PostgreSQL 并发、Exactly-once 和租约回收基准 |
 | `tests/` | 离线单元测试和 PostgreSQL 集成测试 |
 
-架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md)、[ADR 0005](docs/adr/0005-container-runtime-and-ci.md)、[ADR 0006](docs/adr/0006-opentelemetry-and-runtime-benchmark.md)、[ADR 0007](docs/adr/0007-web-product-entry.md)、[ADR 0008](docs/adr/0008-multi-turn-context-and-short-term-memory.md)、[ADR 0009](docs/adr/0009-browser-auth-and-tenant-isolation.md) 和 [ADR 0010](docs/adr/0010-session-history-and-local-demo-data.md)。
+架构决策见 [ADR 0001](docs/adr/0001-modular-travel-planner.md)、[ADR 0002](docs/adr/0002-secrets-and-runtime-side-effects.md)、[ADR 0003](docs/adr/0003-durable-worker-and-sse.md)、[ADR 0004](docs/adr/0004-postgresql-worker-leases.md)、[ADR 0005](docs/adr/0005-container-runtime-and-ci.md)、[ADR 0006](docs/adr/0006-opentelemetry-and-runtime-benchmark.md)、[ADR 0007](docs/adr/0007-web-product-entry.md)、[ADR 0008](docs/adr/0008-multi-turn-context-and-short-term-memory.md)、[ADR 0009](docs/adr/0009-browser-auth-and-tenant-isolation.md)、[ADR 0010](docs/adr/0010-session-history-and-local-demo-data.md) 和 [ADR 0011](docs/adr/0011-versioned-run-results.md)。
 
 ## Docker Compose 一键启动
 

@@ -32,11 +32,11 @@ from .context import ContextPolicy, prepare_session_context
 from .database import Database
 from .store import (
     WorkerLeaseLost,
-    append_event,
     claim_next_run,
     complete_run,
     fail_run,
     get_run_execution_input,
+    record_context_snapshot,
     renew_lease,
 )
 from .telemetry import (
@@ -231,12 +231,11 @@ def execute_run(
                     summary_updated=usage.summary_updated,
                     over_budget=usage.over_budget,
                 )
-                append_event(
+                record_context_snapshot(
                     database,
                     run_id,
-                    "CONTEXT_PREPARED",
+                    worker_id,
                     usage.event_data(),
-                    expected_worker_id=worker_id,
                 )
                 answer = runner(
                     execution_input.prompt,

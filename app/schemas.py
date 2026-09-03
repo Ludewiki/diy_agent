@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from enum import StrEnum
+from typing import Annotated, Any, Literal
 import uuid
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -70,8 +71,97 @@ class SessionListResponse(BaseModel):
     page_size: int
 
 
+class ResultStatus(StrEnum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+class ComponentStatus(StrEnum):
+    PENDING = "pending"
+    READY = "ready"
+    DEGRADED = "degraded"
+    UNAVAILABLE = "unavailable"
+
+
+class PlanningRequestSnapshot(BaseModel):
+    message: str = Field(default="", max_length=20_000)
+    city: str | None = Field(default=None, max_length=80)
+    trip_days: int | None = Field(default=None, ge=1, le=30)
+    interests: list[
+        Annotated[str, Field(min_length=1, max_length=100)]
+    ] = Field(default_factory=list, max_length=20)
+    budget: str | None = Field(default=None, max_length=300)
+    additional_preferences: str | None = Field(default=None, max_length=2_000)
+
+
+class ResultComponent(BaseModel):
+    status: ComponentStatus = ComponentStatus.PENDING
+    error_code: str | None = Field(default=None, max_length=100)
+    message: str | None = Field(default=None, max_length=1_000)
+    updated_at: datetime | None = None
+    inherited_from_run_id: uuid.UUID | None = None
+
+
+class ResultComponents(BaseModel):
+    weather: ResultComponent = Field(default_factory=ResultComponent)
+    guide: ResultComponent = Field(default_factory=ResultComponent)
+    route: ResultComponent = Field(default_factory=ResultComponent)
+
+
+class ResultSource(BaseModel):
+    provider: str = Field(max_length=100)
+    title: str = Field(max_length=500)
+    url: str | None = Field(default=None, max_length=2_000)
+    purpose: str = Field(max_length=100)
+    fetched_at: datetime
+
+
+class ResultWarning(BaseModel):
+    code: str = Field(max_length=100)
+    message: str = Field(max_length=2_000)
+    severity: Literal["info", "warning", "error"] = "warning"
+    scope: Literal["weather", "guide", "route", "agent"] = "agent"
+
+
+class ContextUsageSnapshot(BaseModel):
+    max_input_tokens: int = 0
+    estimated_input_tokens: int = 0
+    current_message_tokens: int = 0
+    history_tokens: int = 0
+    summary_tokens: int = 0
+    system_reserved_tokens: int = 0
+    tool_reserved_tokens: int = 0
+    output_reserved_tokens: int = 0
+    history_messages_used: int = 0
+    messages_summarized: int = 0
+    messages_truncated: int = 0
+    summary_present: bool = False
+    summary_updated: bool = False
+    over_budget: bool = False
+
+
+class RunResultV1(BaseModel):
+    """Durable, versioned product result; SSE only announces changes to it."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    result_status: ResultStatus = ResultStatus.PARTIAL
+    generated_at: datetime
+    plan_revision: int = Field(default=1, ge=1)
+    supersedes_run_id: uuid.UUID | None = None
+    request: PlanningRequestSnapshot = Field(default_factory=PlanningRequestSnapshot)
+    assistant_answer: str = ""
+    weather_window: dict[str, Any] | None = None
+    itinerary: dict[str, Any] | None = None
+    sources: list[ResultSource] = Field(default_factory=list, max_length=100)
+    warnings: list[ResultWarning] = Field(default_factory=list, max_length=100)
+    components: ResultComponents = Field(default_factory=ResultComponents)
+    context_usage: ContextUsageSnapshot | None = None
+
+
 class MessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=20_000)
+    planning_context: PlanningRequestSnapshot | None = None
 
 
 class MessageResponse(BaseModel):
@@ -90,7 +180,7 @@ class RunResponse(BaseModel):
     user_message_id: uuid.UUID
     assistant_message_id: uuid.UUID | None
     status: str
-    output: dict[str, Any] | None
+    output: RunResultV1
     error_code: str | None
     error_message: str | None
     cancel_requested: bool

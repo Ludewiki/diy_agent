@@ -11,7 +11,7 @@
 
 1. `GET /v1/sessions` 使用页码和页大小分页，默认隐藏归档会话。每项包括最近消息预览、消息数、更新时间、最后 Run ID 和状态。
 2. 使用 `PATCH /v1/sessions/{id}` 重命名、归档或恢复归档；使用 `DELETE /v1/sessions/{id}` 永久删除。所有操作继续使用 user_id 所有权、CSRF 与 Origin 校验。
-3. 消息时间线沿用 `GET /v1/sessions/{id}/messages`。前端选择历史项时加载时间线，并从最后 Run 的 SSE 起点回放持久化事件；这能重建天气、攻略与路线展示，再读取最终 Run 输出。
+3. 消息时间线沿用 `GET /v1/sessions/{id}/messages`。前端选择历史项时加载时间线和最后 Run。结果恢复方式已由 [ADR 0011](0011-versioned-run-results.md) 调整为读取版本化 Run 结果；SSE 回放只恢复实时状态。
 4. 页面认证成功后仅自动恢复最近一个未归档 Session，不在 localStorage 保存 Session 或认证信息。
 5. 本地 Compose 增加一次性 `demo-seed` 服务。只有 `DEMO_USER_ENABLED=true` 时运行数据绑定：优先使用最早的启用状态 163.com 用户；否则复用或创建 `admin@admin.com`，本地初始密码为 `123456`；随后只迁移 legacy 用户拥有的 Session。
 6. 应用配置默认关闭 demo seed。Compose 的本地默认值开启，生产环境必须显式关闭，并使用正式账号生命周期。

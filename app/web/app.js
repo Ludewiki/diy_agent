@@ -314,7 +314,16 @@
         "/v1/sessions/" + state.sessionId + "/messages",
         {
           method: "POST",
-          body: JSON.stringify({ content: prompt }),
+          body: JSON.stringify({
+            content: prompt,
+            planning_context: {
+              city,
+              trip_days: Number(formData.get("days") || 3),
+              interests: formData.getAll("interest").map(String),
+              budget: String(formData.get("budget") || ""),
+              additional_preferences: String(formData.get("notes") || "").trim() || null,
+            },
+          }),
         }
       );
       state.runId = runResult.body.run.id;
@@ -367,6 +376,7 @@
       $("#run-reference").textContent = "RUN " + state.runId.slice(0, 8).toUpperCase();
       $("#trace-id").textContent = state.traceId || "等待 Trace";
       setStatus("追问已入队", "running");
+      renderRunOutput(runResult.body.run.output);
       await loadMessageTimeline(state.sessionId);
       openEventStream(runResult.body.events_url);
       loadSessionHistory({ restoreLatest: false });
@@ -442,9 +452,9 @@
     } else if (type === "TOOL_STARTED") {
       handleToolStarted(data.tool_name);
     } else if (type === "TOOL_SUCCEEDED") {
-      handleToolCompleted(data.tool_name, data.result, true);
+      handleToolCompleted(data.tool_name, true);
     } else if (type === "TOOL_FAILED") {
-      handleToolCompleted(data.tool_name, data.result, false);
+      handleToolCompleted(data.tool_name, false);
     } else if (type === "RUN_RETRY_SCHEDULED") {
       setStatus("等待重试", "running");
       addWarning("本次执行遇到可恢复错误，Worker 已安排重试。");
@@ -477,21 +487,17 @@
     }
   }
 
-  function handleToolCompleted(name, result, succeeded) {
-    if (result && result.status === "error") {
-      addWarning((result.error_code || "TOOL_ERROR") + "：" + (result.message || "上游服务不可用"));
-    }
+  function handleToolCompleted(name, succeeded) {
     if (name === "find_best_weather_window") {
       setStage("weather", succeeded ? "done" : "active", succeeded ? "天气候选已生成" : "天气服务降级");
-      if (result && result.status !== "error") renderWeather(result);
-      if (!succeeded) showError((result && result.message) || "天气 Tool 执行失败。");
+      if (!succeeded) showError("天气 Tool 执行失败。");
     } else if (name === "plan_wikivoyage_trip") {
       setStage("guide", succeeded ? "done" : "active", succeeded ? "攻略与景点已提取" : "攻略服务降级");
       setStage("route", succeeded ? "done" : "active", succeeded ? "每日路线已优化" : "路线服务降级");
       setStage("complete", "active", "Agent 正在组织回答");
-      if (result && result.status !== "error") renderPlan(result);
-      if (!succeeded) showError((result && result.message) || "攻略 Tool 执行失败。");
+      if (!succeeded) showError("攻略 Tool 执行失败。");
     }
+    fetchFinalRun({ refreshMessages: false });
   }
 
   function renderWeather(result) {
@@ -856,18 +862,51 @@
     }
   }
 
-  async function fetchFinalRun() {
+  function renderContextUsage(usage) {
+    if (!usage) return;
+    const used = Number(usage.estimated_input_tokens || 0).toLocaleString("zh-CN");
+    const limit = Number(usage.max_input_tokens || 0).toLocaleString("zh-CN");
+    $("#context-tokens").textContent = used + " / " + limit + " tokens";
+    $("#context-history").textContent = "历史 " + Number(usage.history_messages_used || 0) + " 条";
+    $("#context-summary").textContent = usage.summary_present
+      ? (usage.summary_updated ? "摘要已更新" : "摘要已复用")
+      : "摘要未使用";
+  }
+
+  function renderRunOutput(output) {
+    if (!output) return;
+    state.warnings = new Set(defaultWarnings);
+    (output.warnings || []).forEach((warning) => {
+      addWarning(typeof warning === "string" ? warning : warning.message);
+    });
+    if (output.weather_window) renderWeather(output.weather_window);
+    if (output.itinerary) renderPlan(output.itinerary);
+    renderContextUsage(output.context_usage);
+    renderSources(output.sources || []);
+
+    const inherited = Object.values(output.components || {}).filter(
+      (component) => component && component.inherited_from_run_id
+    ).length;
+    if (inherited) {
+      addWarning("当前版本有 " + inherited + " 个组件沿用上一版结果；未重复调用对应 Tool。");
+    }
+    if (output.assistant_answer) {
+      $("#answer-panel").classList.remove("is-hidden");
+      $("#final-answer").textContent = output.assistant_answer;
+    } else {
+      $("#answer-panel").classList.add("is-hidden");
+      $("#final-answer").textContent = "";
+    }
+  }
+
+  async function fetchFinalRun({ refreshMessages = true } = {}) {
     if (!state.runId) return;
     try {
       const result = await requestJson("/v1/runs/" + state.runId, { method: "GET" });
       const run = result.body;
       if (run.error_message) showError(run.error_message);
-      if (run.output) {
-        $("#answer-panel").classList.remove("is-hidden");
-        $("#final-answer").textContent = run.output.answer || "Agent 已完成，但没有返回文字总结。";
-        renderSources(run.output.reference || []);
-      }
-      if (state.sessionId) await loadMessageTimeline(state.sessionId);
+      renderRunOutput(run.output);
+      if (refreshMessages && state.sessionId) await loadMessageTimeline(state.sessionId);
     } catch (error) {
       addWarning("最终 Run 查询失败：" + error.message);
     }
@@ -1193,6 +1232,7 @@
       "RUN " + state.runId.slice(0, 8).toUpperCase();
     setStatus(statusLabel(item.last_run_status), "running");
     setButtonRunning(["PENDING", "RUNNING"].includes(item.last_run_status));
+    await fetchFinalRun({ refreshMessages: false });
     openEventStream("/v1/runs/" + state.runId + "/events");
   }
 

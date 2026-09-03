@@ -116,8 +116,51 @@ def test_migration_and_concurrent_worker_claims(
     with postgres_database.session_factory() as session:
         outputs = list(session.scalars(select(AgentRun.output_json)))
         event_count = len(list(session.scalars(select(RunEvent.id))))
-    assert all(output == {"answer": "ok", "reference": [{"title": "source"}]} for output in outputs)
+    assert all(output["schema_version"] == "1.0" for output in outputs)
+    assert all(output["assistant_answer"] == "ok" for output in outputs)
+    assert all(output["sources"][0]["title"] == "source" for output in outputs)
     assert event_count == 6
+
+
+@pytest.mark.postgres
+@pytest.mark.integration
+def test_concurrent_messages_receive_unique_plan_revisions(
+    postgres_database: Database,
+) -> None:
+    with postgres_database.session_factory.begin() as session:
+        user = User(
+            email="postgres-revisions@example.com",
+            password_hash="not-used-in-this-test",
+        )
+        session.add(user)
+        session.flush()
+        conversation = AgentSession(user_id=user.id, title="revision test")
+        session.add(conversation)
+        session.flush()
+        user_id = user.id
+        session_id = conversation.id
+
+    def enqueue(number: int) -> uuid.UUID:
+        queued = enqueue_message(
+            postgres_database,
+            session_id,
+            user_id,
+            f"concurrent request {number}",
+        )
+        assert queued is not None
+        return queued[1].id
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        run_ids = list(executor.map(enqueue, range(8)))
+
+    with postgres_database.session_factory() as session:
+        outputs = list(
+            session.scalars(
+                select(AgentRun.output_json).where(AgentRun.id.in_(run_ids))
+            )
+        )
+    revisions = sorted(output["plan_revision"] for output in outputs)
+    assert revisions == list(range(1, 9))
 
 
 @pytest.mark.postgres

@@ -21,6 +21,14 @@ from .models import (
     RunStatus,
     utc_now,
 )
+from .run_results import (
+    apply_context_usage,
+    apply_tool_result,
+    build_initial_result,
+    coerce_run_result,
+    complete_result,
+    fail_result,
+)
 from .telemetry import (
     inject_trace_context,
     record_run_claim,
@@ -72,7 +80,13 @@ def run_to_dict(run: AgentRun) -> dict[str, Any]:
         "user_message_id": run.user_message_id,
         "assistant_message_id": run.assistant_message_id,
         "status": run.status,
-        "output": decode_json(run.output_json),
+        "output": coerce_run_result(
+            decode_json(run.output_json),
+            run_status=run.status,
+            generated_at=run.finished_at or run.updated_at or run.created_at,
+            error_code=run.error_code,
+            error_message=run.error_message,
+        ),
         "error_code": run.error_code,
         "error_message": run.error_message,
         "cancel_requested": run.cancel_requested,
@@ -151,14 +165,16 @@ def enqueue_message(
     content: str,
     *,
     max_attempts: int = 3,
+    planning_context: dict[str, Any] | None = None,
 ) -> tuple[Message, AgentRun] | None:
     with database.session_factory.begin() as session:
-        conversation = session.scalar(
-            select(AgentSession).where(
-                AgentSession.id == session_id,
-                AgentSession.user_id == user_id,
-            )
+        conversation_statement = select(AgentSession).where(
+            AgentSession.id == session_id,
+            AgentSession.user_id == user_id,
         )
+        if database.is_postgresql:
+            conversation_statement = conversation_statement.with_for_update()
+        conversation = session.scalar(conversation_statement)
         if conversation is None:
             return None
         message = Message(
@@ -168,11 +184,41 @@ def enqueue_message(
         )
         session.add(message)
         session.flush()
+        previous_success = session.scalar(
+            select(AgentRun)
+            .where(
+                AgentRun.session_id == session_id,
+                AgentRun.status == RunStatus.SUCCEEDED.value,
+            )
+            .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+            .limit(1)
+        )
+        plan_revision = int(
+            session.scalar(
+                select(func.count(AgentRun.id)).where(
+                    AgentRun.session_id == session_id
+                )
+            )
+            or 0
+        ) + 1
         run = AgentRun(
             session_id=session_id,
             user_message_id=message.id,
             max_attempts=max_attempts,
             trace_context_json=inject_trace_context() or None,
+            output_json=build_initial_result(
+                content,
+                planning_context=planning_context,
+                plan_revision=plan_revision,
+                supersedes_run_id=(
+                    previous_success.id if previous_success is not None else None
+                ),
+                previous_output=(
+                    decode_json(previous_success.output_json)
+                    if previous_success is not None
+                    else None
+                ),
+            ),
         )
         session.add(run)
         session.flush()
@@ -184,6 +230,71 @@ def enqueue_message(
         )
         conversation.updated_at = utc_now()
         return message, run
+
+
+def record_context_snapshot(
+    database: Database,
+    run_id: uuid.UUID,
+    worker_id: str,
+    usage: dict[str, Any],
+) -> None:
+    """Persist context usage and its SSE notification atomically."""
+    with database.session_factory.begin() as session:
+        run = _locked_run(session, run_id)
+        if run is None:
+            raise LookupError(f"Run 不存在：{run_id}")
+        if (
+            run.worker_id != worker_id
+            or run.status != RunStatus.RUNNING.value
+            or not _lease_is_active(run.lease_expires_at)
+        ):
+            raise WorkerLeaseLost(f"Worker 已失去 Run {run_id} 的租约。")
+        run.output_json = apply_context_usage(decode_json(run.output_json), usage)
+        run.updated_at = utc_now()
+        append_event_in_session(
+            session,
+            run_id,
+            "CONTEXT_PREPARED",
+            usage,
+            expected_worker_id=worker_id,
+        )
+
+
+def record_tool_snapshot(
+    database: Database,
+    run_id: uuid.UUID,
+    worker_id: str,
+    tool_name: str,
+    snapshot: dict[str, Any] | None,
+    *,
+    succeeded: bool,
+    event_data: dict[str, Any],
+) -> None:
+    """Persist an allowlisted Tool artifact and its progress event atomically."""
+    with database.session_factory.begin() as session:
+        run = _locked_run(session, run_id)
+        if run is None:
+            raise LookupError(f"Run 不存在：{run_id}")
+        if (
+            run.worker_id != worker_id
+            or run.status != RunStatus.RUNNING.value
+            or not _lease_is_active(run.lease_expires_at)
+        ):
+            raise WorkerLeaseLost(f"Worker 已失去 Run {run_id} 的租约。")
+        run.output_json = apply_tool_result(
+            decode_json(run.output_json),
+            tool_name,
+            snapshot,
+            succeeded=succeeded,
+        )
+        run.updated_at = utc_now()
+        append_event_in_session(
+            session,
+            run_id,
+            "TOOL_SUCCEEDED" if succeeded else "TOOL_FAILED",
+            event_data,
+            expected_worker_id=worker_id,
+        )
 
 
 def _mark_terminal_expired_runs(session: Session, database: Database) -> None:
@@ -214,6 +325,12 @@ def _mark_terminal_expired_runs(session: Session, database: Database) -> None:
             if cancelled
             else "Worker 租约过期且已达到最大尝试次数。"
         )
+        run.output_json = fail_result(
+            decode_json(run.output_json),
+            run.error_code,
+            run.error_message,
+            terminal=True,
+        )
         run.worker_id = None
         run.lease_expires_at = None
         run.finished_at = now
@@ -223,7 +340,7 @@ def _mark_terminal_expired_runs(session: Session, database: Database) -> None:
             run.id,
             "RUN_CANCELLED" if cancelled else "RUN_FAILED",
             {
-                "status": RunStatus.FAILED.value,
+                "status": run.status,
                 "error_code": run.error_code,
                 "message": run.error_message,
             },
@@ -406,6 +523,14 @@ def complete_run(
             raise WorkerLeaseLost(f"Worker 已失去 Run {run_id} 的租约。")
         if run.cancel_requested:
             run.status = RunStatus.CANCELLED.value
+            run.error_code = "RUN_CANCELLED"
+            run.error_message = "用户已请求取消任务。"
+            run.output_json = fail_result(
+                decode_json(run.output_json),
+                run.error_code,
+                run.error_message,
+                terminal=True,
+            )
             run.finished_at = utc_now()
             run.worker_id = None
             run.lease_expires_at = None
@@ -416,10 +541,11 @@ def complete_run(
                 {"status": RunStatus.CANCELLED.value},
             )
             return True
+        final_output = complete_result(decode_json(run.output_json), output)
         assistant = Message(
             session_id=run.session_id,
             role=MessageRole.ASSISTANT.value,
-            content=str(output.get("answer", "")),
+            content=str(final_output.get("assistant_answer", "")),
         )
         session.add(assistant)
         session.flush()
@@ -427,7 +553,7 @@ def complete_run(
         if conversation is not None:
             conversation.updated_at = utc_now()
         run.assistant_message_id = assistant.id
-        run.output_json = output
+        run.output_json = final_output
         run.status = RunStatus.SUCCEEDED.value
         run.error_code = None
         run.error_message = None
@@ -485,6 +611,12 @@ def fail_run(
             run.error_message = error_message
             run.finished_at = now
             event_type = "RUN_FAILED"
+        run.output_json = fail_result(
+            decode_json(run.output_json),
+            str(run.error_code or error_code),
+            str(run.error_message or error_message),
+            terminal=event_type in {"RUN_FAILED", "RUN_CANCELLED"},
+        )
         run.worker_id = None
         run.lease_expires_at = None
         run.updated_at = now
@@ -534,7 +666,15 @@ def request_cancellation(
         run.updated_at = utc_now()
         if run.status == RunStatus.PENDING.value:
             run.status = RunStatus.CANCELLED.value
+            run.error_code = "RUN_CANCELLED"
+            run.error_message = "用户已请求取消任务。"
             run.finished_at = utc_now()
+            run.output_json = fail_result(
+                decode_json(run.output_json),
+                "RUN_CANCELLED",
+                "用户已请求取消任务。",
+                terminal=True,
+            )
             append_event_in_session(
                 session,
                 run_id,

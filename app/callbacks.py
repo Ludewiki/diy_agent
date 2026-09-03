@@ -18,6 +18,7 @@ from .store import (
     WorkerLeaseLost,
     append_event,
     is_cancel_requested,
+    record_tool_snapshot,
     worker_has_lease,
 )
 from .telemetry import record_llm_call, record_tool_call, runtime
@@ -411,13 +412,18 @@ class ProgressCallback(BaseCallbackHandler):
         state = self._tools.pop(str(run_id), None)
         name = state.name if state is not None else "unknown_tool"
         outcome = tool_outcome(output)
-        event_type = "TOOL_SUCCEEDED" if outcome == "success" else "TOOL_FAILED"
         event_data: dict[str, Any] = {"tool_name": name}
         snapshot = build_tool_snapshot(name, output)
-        if snapshot is not None:
-            event_data["result"] = snapshot
         try:
-            self._append(event_type, event_data)
+            record_tool_snapshot(
+                self.database,
+                self.agent_run_id,
+                self.worker_id,
+                name,
+                snapshot,
+                succeeded=outcome == "success",
+                event_data=event_data,
+            )
         finally:
             if state is not None:
                 error = (
@@ -446,10 +452,23 @@ class ProgressCallback(BaseCallbackHandler):
     ) -> None:
         state = self._tools.pop(str(run_id), None)
         name = state.name if state is not None else "unknown_tool"
+        snapshot = {
+            "status": "error",
+            "error_code": "TOOL_CALLBACK_ERROR",
+            "message": "Tool 调用异常，请稍后重试。",
+        }
         try:
-            self._append(
-                "TOOL_FAILED",
-                {"tool_name": name, "error_type": type(error).__name__},
+            record_tool_snapshot(
+                self.database,
+                self.agent_run_id,
+                self.worker_id,
+                name,
+                snapshot,
+                succeeded=False,
+                event_data={
+                    "tool_name": name,
+                    "error_type": type(error).__name__,
+                },
             )
         finally:
             if state is not None:

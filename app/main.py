@@ -623,6 +623,11 @@ def create_app(
                     user.id,
                     payload.content,
                     max_attempts=runtime_settings.worker_max_attempts,
+                    planning_context=(
+                        payload.planning_context.model_dump(mode="json")
+                        if payload.planning_context is not None
+                        else None
+                    ),
                 )
                 if queued is not None:
                     span.set_attribute("agent.run.id", str(queued[1].id))

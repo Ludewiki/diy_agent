@@ -90,7 +90,8 @@ def test_expired_run_is_reclaimed_and_stale_worker_is_fenced(
         run = session.get(AgentRun, run_id)
         assert run is not None
         assert run.status == RunStatus.SUCCEEDED.value
-        assert run.output_json["answer"] == "fresh"
+        assert run.output_json["schema_version"] == "1.0"
+        assert run.output_json["assistant_answer"] == "fresh"
         assert run.attempt_count == 2
 
     events, _ = read_events_after(database, run_id, 0)
@@ -138,7 +139,13 @@ def test_running_cancellation_keeps_lease_until_worker_records_it(
         run = session.get(AgentRun, run_id)
         assert run is not None
         assert run.status == RunStatus.CANCELLED.value
-        assert run.output_json is None
+        assert run.output_json["schema_version"] == "1.0"
+        assert run.output_json["result_status"] == "failed"
+        assert run.output_json["assistant_answer"] == ""
+        assert any(
+            warning["code"] == "RUN_CANCELLED"
+            for warning in run.output_json["warnings"]
+        )
 
 
 def test_cancelled_run_with_crashed_worker_is_finalized_after_lease_expiry(
