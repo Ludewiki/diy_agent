@@ -901,13 +901,16 @@
 
   async function fetchFinalRun({ refreshMessages = true } = {}) {
     if (!state.runId) return;
+    const requestedRunId = state.runId;
     try {
-      const result = await requestJson("/v1/runs/" + state.runId, { method: "GET" });
+      const result = await requestJson("/v1/runs/" + requestedRunId, { method: "GET" });
+      if (state.runId !== requestedRunId) return;
       const run = result.body;
       if (run.error_message) showError(run.error_message);
       renderRunOutput(run.output);
       if (refreshMessages && state.sessionId) await loadMessageTimeline(state.sessionId);
     } catch (error) {
+      if (state.runId !== requestedRunId) return;
       addWarning("最终 Run 查询失败：" + error.message);
     }
   }
@@ -944,7 +947,9 @@
     $("#auth-mode").textContent = registering
       ? "已有账号？返回登录"
       : "还没有账号？创建账号";
-    $("#auth-password").autocomplete = registering ? "new-password" : "current-password";
+    const password = $("#auth-password");
+    password.autocomplete = registering ? "new-password" : "current-password";
+    password.minLength = registering ? 8 : 1;
     $("#auth-error").classList.add("is-hidden");
   }
 

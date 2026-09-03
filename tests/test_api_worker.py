@@ -77,7 +77,7 @@ def test_product_page_and_assets_are_served(client: TestClient) -> None:
     assert 'id="planner-form"' in page.text
     assert 'id="weather-candidates"' in page.text
     assert 'id="map"' in page.text
-    assert "/static/app.js?v=20260903-workbench" in page.text
+    assert "/static/app.js?v=20260903-run-result-v1" in page.text
     assert 'id="history-dialog"' in page.text
     assert 'id="workspace-session-list"' in page.text
     assert 'id="conversation-list"' in page.text
@@ -86,12 +86,15 @@ def test_product_page_and_assets_are_served(client: TestClient) -> None:
     assert page.headers["cache-control"] == "no-cache"
     script = client.get("/static/app.js")
     assert script.status_code == 200
+    assert script.headers["cache-control"] == "no-cache"
     assert "new EventSource" in script.text
+    assert "output.weather_window" in script.text
     assert "renderMapDay" in script.text
     assert "submitFollowUp" in script.text
     assert '"/messages"' in script.text
     styles = client.get("/static/styles.css")
     assert styles.status_code == 200
+    assert styles.headers["cache-control"] == "no-cache"
     assert ".planner-card" in styles.text
     assert ".workbench-grid" in styles.text
     assert ".message-bubble" in styles.text

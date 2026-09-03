@@ -46,6 +46,8 @@ class AuthService:
         self.settings = settings
 
     def register(self, email: str, password: str) -> tuple[User, str]:
+        raw_token = secrets.token_urlsafe(32)
+        now = utc_now()
         user = User(
             email=normalize_email(email),
             password_hash=hash_password(password),
@@ -54,13 +56,21 @@ class AuthService:
             with self.database.session_factory.begin() as session:
                 session.add(user)
                 session.flush()
+                session.add(
+                    AuthSession(
+                        user_id=user.id,
+                        token_hash=hash_session_token(raw_token),
+                        expires_at=now
+                        + timedelta(days=self.settings.auth_session_lifetime_days),
+                    )
+                )
         except IntegrityError as exc:
             raise ApiError(
                 409,
                 "EMAIL_ALREADY_REGISTERED",
                 "该邮箱已经注册，请直接登录。",
             ) from exc
-        return user, self._create_session(user.id)
+        return user, raw_token
 
     def login(self, email: str, password: str) -> tuple[User, str]:
         normalized = normalize_email(email)

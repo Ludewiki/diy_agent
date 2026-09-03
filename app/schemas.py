@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class RegisterCredentials(BaseModel):
     email: str = Field(min_length=3, max_length=320)
-    password: str = Field(min_length=12, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
 
 
 class LoginCredentials(BaseModel):

@@ -6,11 +6,11 @@ from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy import select
 
-from app.auth import hash_session_token
+from app.auth import hash_password, hash_session_token
 from app.config import Settings
 from app.database import Database
 from app.main import create_app
-from app.models import AuthSession
+from app.models import AuthSession, User
 
 
 @pytest.fixture
@@ -87,6 +87,70 @@ def test_http_only_cookie_uses_server_side_hashed_session(
             assert stored is not None
             assert stored.token_hash == hash_session_token(raw_token)
             assert stored.token_hash != raw_token
+
+
+def test_registration_accepts_eight_characters_and_rejects_seven(app) -> None:
+    with TestClient(app) as client:
+        csrf = client.get("/v1/auth/csrf").json()["csrf_token"]
+        accepted = client.post(
+            "/v1/auth/register",
+            json={"email": "eight@example.com", "password": "12345678"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert accepted.status_code == 201
+
+        rejected = client.post(
+            "/v1/auth/register",
+            json={"email": "seven@example.com", "password": "1234567"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert rejected.status_code == 422
+        assert rejected.json()["error_code"] == "VALIDATION_ERROR"
+
+
+def test_existing_eleven_character_password_can_still_login(
+    app,
+    database: Database,
+) -> None:
+    password = "12345678901"
+    with database.session_factory.begin() as session:
+        session.add(
+            User(
+                email="existing@163.com",
+                password_hash=hash_password(password),
+            )
+        )
+
+    with TestClient(app) as client:
+        csrf = client.get("/v1/auth/csrf").json()["csrf_token"]
+        response = client.post(
+            "/v1/auth/login",
+            json={"email": "existing@163.com", "password": password},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert response.status_code == 200
+        assert response.json()["email"] == "existing@163.com"
+
+
+def test_database_failure_returns_structured_503() -> None:
+    unavailable = Database("sqlite:///:memory:")
+    app = create_app(
+        database=unavailable,
+        settings=Settings(database_url=unavailable.url),
+        sync_runner=lambda prompt: {"answer": prompt, "reference": []},
+    )
+    try:
+        with TestClient(app) as client:
+            csrf = client.get("/v1/auth/csrf").json()["csrf_token"]
+            response = client.post(
+                "/v1/auth/login",
+                json={"email": "existing@163.com", "password": "12345678901"},
+                headers={"X-CSRF-Token": csrf},
+            )
+        assert response.status_code == 503
+        assert response.json()["error_code"] == "DATABASE_UNAVAILABLE"
+    finally:
+        unavailable.dispose()
 
 
 def test_csrf_and_origin_are_required_for_mutations(app) -> None:

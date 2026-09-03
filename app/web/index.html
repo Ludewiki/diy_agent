@@ -13,14 +13,14 @@
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
       crossorigin=""
     >
-    <link rel="stylesheet" href="/static/styles.css?v=20260903-workbench">
+    <link rel="stylesheet" href="/static/styles.css?v=20260903-run-result-v1">
     <script
       src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
       integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
       crossorigin=""
       defer
     ></script>
-    <script src="/static/app.js?v=20260903-workbench" defer></script>
+    <script src="/static/app.js?v=20260903-run-result-v1" defer></script>
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
@@ -59,7 +59,7 @@
         </label>
         <label class="field">
           <span>密码</span>
-          <input id="auth-password" name="password" type="password" minlength="12" maxlength="128" autocomplete="current-password" required>
+          <input id="auth-password" name="password" type="password" minlength="1" maxlength="128" autocomplete="current-password" required>
         </label>
         <p id="auth-error" class="auth-error is-hidden" role="alert"></p>
         <button id="auth-submit" class="primary-button" type="submit">

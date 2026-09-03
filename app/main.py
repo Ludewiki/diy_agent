@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from opentelemetry import trace
 
 from logging_config import configure_logging
@@ -70,6 +71,15 @@ from .telemetry import (
 logger = logging.getLogger(__name__)
 SyncRunner = Callable[..., Any]
 WEB_DIRECTORY = Path(__file__).resolve().parent / "web"
+
+
+class RevalidatingStaticFiles(StaticFiles):
+    """Prevent a cached frontend bundle from drifting behind the API contract."""
+
+    async def get_response(self, path: str, scope: dict[str, Any]) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def _answer_dict(answer: Any) -> dict[str, Any]:
@@ -167,7 +177,7 @@ def create_app(
     )
     application.mount(
         "/static",
-        StaticFiles(directory=WEB_DIRECTORY),
+        RevalidatingStaticFiles(directory=WEB_DIRECTORY),
         name="static",
     )
 
@@ -224,6 +234,27 @@ def create_app(
                 "VALIDATION_ERROR",
                 "请求参数校验失败。",
                 {"errors": exc.errors()},
+            ),
+        )
+
+    @application.exception_handler(SQLAlchemyError)
+    async def database_error_handler(
+        request: Request, exc: SQLAlchemyError
+    ) -> JSONResponse:
+        logger.error(
+            "database operation failed",
+            exc_info=exc,
+            extra={
+                "event": "database_unavailable",
+                "request_id": getattr(request.state, "request_id", None),
+            },
+        )
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=_error_payload(
+                request,
+                "DATABASE_UNAVAILABLE",
+                "数据库暂时不可用，请稍后重试。",
             ),
         )
 
