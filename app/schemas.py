@@ -71,6 +71,48 @@ class SessionListResponse(BaseModel):
     page_size: int
 
 
+class MemoryCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=2_000)
+    memory_type: Literal[
+        "profile", "preference", "episodic", "rejected"
+    ] = "preference"
+
+
+class MemoryUpdate(BaseModel):
+    content: str | None = Field(default=None, min_length=1, max_length=2_000)
+    status: Literal["CANDIDATE", "CONFIRMED"] | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> "MemoryUpdate":
+        if self.content is None and self.status is None:
+            raise ValueError("至少提供 content 或 status")
+        return self
+
+
+class MemoryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    memory_type: str
+    content: str
+    confidence: float
+    status: str
+    source_message_id: uuid.UUID | None
+    source_run_id: uuid.UUID | None
+    expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemoryListResponse(BaseModel):
+    items: list[MemoryResponse]
+    total: int
+    candidate_count: int
+    confirmed_count: int
+    page: int
+    page_size: int
+
+
 class ResultStatus(StrEnum):
     COMPLETE = "complete"
     PARTIAL = "partial"
@@ -130,10 +172,12 @@ class ContextUsageSnapshot(BaseModel):
     current_message_tokens: int = 0
     history_tokens: int = 0
     summary_tokens: int = 0
+    long_term_memory_tokens: int = 0
     system_reserved_tokens: int = 0
     tool_reserved_tokens: int = 0
     output_reserved_tokens: int = 0
     history_messages_used: int = 0
+    long_term_memories_recalled: int = 0
     messages_summarized: int = 0
     messages_truncated: int = 0
     summary_present: bool = False

@@ -18,6 +18,7 @@ from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from pydantic import BaseModel
+from sqlalchemy import select
 
 from logging_config import configure_logging
 from weather_window import run_prompt
@@ -30,6 +31,8 @@ from .callbacks import (
 from .config import Settings
 from .context import ContextPolicy, prepare_session_context
 from .database import Database
+from .memory import LangGraphPostgresStoreBackend, MemoryService
+from .models import AgentRun, RunStatus
 from .store import (
     WorkerLeaseLost,
     claim_next_run,
@@ -163,6 +166,7 @@ def execute_run(
     max_llm_calls: int = 6,
     max_tool_calls: int = 4,
     runner: Runner = run_prompt,
+    memory_service: MemoryService | None = None,
 ) -> None:
     execution_input = get_run_execution_input(database, run_id)
     if execution_input is None:
@@ -206,12 +210,21 @@ def execute_run(
                 lease_seconds,
                 heartbeat_seconds,
             ) as heartbeat:
+                recalled_memories = (
+                    memory_service.recall(
+                        execution_input.user_id,
+                        execution_input.prompt,
+                    )
+                    if memory_service is not None
+                    else []
+                )
                 prepared_context = prepare_session_context(
                     database,
                     execution_input.session_id,
                     execution_input.message_id,
                     execution_input.prompt,
                     policy=resolved_context_policy,
+                    long_term_memories=recalled_memories,
                 )
                 usage = prepared_context.usage
                 span.set_attributes(
@@ -220,12 +233,15 @@ def execute_run(
                         "agent.context.history_messages": usage.history_messages_used,
                         "agent.context.summary_present": usage.summary_present,
                         "agent.context.summary_updated": usage.summary_updated,
+                        "agent.context.long_term_memories": usage.long_term_memories_recalled,
                         "agent.context.over_budget": usage.over_budget,
                     }
                 )
                 record_context_prepared(
                     estimated_input_tokens=usage.estimated_input_tokens,
                     history_messages=usage.history_messages_used,
+                    long_term_memory_tokens=usage.long_term_memory_tokens,
+                    long_term_memories_recalled=usage.long_term_memories_recalled,
                     messages_summarized=usage.messages_summarized,
                     messages_truncated=usage.messages_truncated,
                     summary_updated=usage.summary_updated,
@@ -244,7 +260,45 @@ def execute_run(
                 )
                 if heartbeat.lost.is_set():
                     raise WorkerLeaseLost(f"Worker 已失去 Run {run_id} 的租约。")
-            complete_run(database, run_id, worker_id, normalize_answer(answer))
+            completed = complete_run(
+                database,
+                run_id,
+                worker_id,
+                normalize_answer(answer),
+            )
+            if completed and memory_service is not None:
+                with database.session_factory() as session:
+                    final_status = session.scalar(
+                        select(AgentRun.status).where(AgentRun.id == run_id)
+                    )
+                if final_status == RunStatus.SUCCEEDED.value:
+                    try:
+                        planning_request = None
+                        with database.session_factory() as session:
+                            output = session.scalar(
+                                select(AgentRun.output_json).where(
+                                    AgentRun.id == run_id
+                                )
+                            )
+                        if isinstance(output, dict):
+                            request = output.get("request")
+                            if isinstance(request, dict):
+                                planning_request = request
+                        memory_service.extract_from_run(
+                            user_id=execution_input.user_id,
+                            message_id=execution_input.message_id,
+                            run_id=run_id,
+                            prompt=execution_input.prompt,
+                            planning_request=planning_request,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "long-term memory extraction failed",
+                            extra={
+                                "event": "memory_extraction_failed",
+                                "request_id": str(run_id),
+                            },
+                        )
             outcome = "success"
         except RunCancelled as exc:
             outcome = "cancelled"
@@ -334,6 +388,7 @@ def run_once(
     context_policy: ContextPolicy | None = None,
     max_llm_calls: int = 6,
     max_tool_calls: int = 4,
+    memory_service: MemoryService | None = None,
 ) -> uuid.UUID | None:
     resolved_worker_id = worker_id or create_worker_id()
     with telemetry_runtime.tracer.start_as_current_span(
@@ -357,6 +412,7 @@ def run_once(
         max_llm_calls=max_llm_calls,
         max_tool_calls=max_tool_calls,
         runner=runner,
+        memory_service=memory_service,
     )
     return run_id
 
@@ -365,6 +421,7 @@ def serve(
     database: Database,
     settings: Settings,
     runner: Runner = run_prompt,
+    memory_service: MemoryService | None = None,
 ) -> None:
     stopping = False
 
@@ -395,6 +452,7 @@ def serve(
                 context_policy=ContextPolicy.from_settings(settings),
                 max_llm_calls=settings.agent_max_llm_calls,
                 max_tool_calls=settings.agent_max_tool_calls,
+                memory_service=memory_service,
             )
             if claimed is None:
                 time.sleep(settings.worker_poll_seconds)
@@ -420,6 +478,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         database=database,
     )
     database.check_connection()
+    memory_service = (
+        MemoryService(
+            database,
+            LangGraphPostgresStoreBackend(settings.database_url),
+            recall_limit=settings.memory_recall_limit,
+            auto_extract=settings.memory_auto_extract,
+        )
+        if settings.memory_enabled
+        else None
+    )
     try:
         if args.once:
             run_once(
@@ -431,9 +499,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 context_policy=ContextPolicy.from_settings(settings),
                 max_llm_calls=settings.agent_max_llm_calls,
                 max_tool_calls=settings.agent_max_tool_calls,
+                memory_service=memory_service,
             )
         else:
-            serve(database, settings)
+            serve(database, settings, memory_service=memory_service)
     finally:
         telemetry_runtime.shutdown()
         database.dispose()

@@ -14,6 +14,7 @@ from sqlalchemy.engine import make_url
 from app.config import Settings
 from app.database import Database
 from app.main import create_app
+from app.memory import LangGraphPostgresStoreBackend, MemoryService
 from app.models import AgentRun, AgentSession, RunEvent, User
 from app.store import claim_next_run, complete_run, enqueue_message
 
@@ -220,3 +221,42 @@ def test_postgres_session_history_and_lifecycle(
 
         assert client.delete(f"/v1/sessions/{first['id']}").status_code == 204
         assert client.get(f"/v1/sessions/{first['id']}").status_code == 404
+
+
+@pytest.mark.postgres
+@pytest.mark.integration
+def test_langgraph_postgres_store_recall_is_user_scoped(
+    postgres_database: Database,
+) -> None:
+    service = MemoryService(
+        postgres_database,
+        LangGraphPostgresStoreBackend(postgres_database.url),
+        recall_limit=8,
+    )
+    service.setup_store()
+    with postgres_database.session_factory.begin() as session:
+        alice = User(
+            email="memory-alice@example.com",
+            password_hash="not-used-in-this-test",
+        )
+        bob = User(
+            email="memory-bob@example.com",
+            password_hash="not-used-in-this-test",
+        )
+        session.add_all([alice, bob])
+        session.flush()
+        alice_id = alice.id
+        bob_id = bob.id
+
+    memory = service.create_manual(
+        alice_id,
+        "我喜欢历史建筑，旅行节奏要宽松。",
+        "preference",
+    )
+
+    assert service.recall(alice_id, "规划一趟历史建筑旅行") == [
+        "我喜欢历史建筑，旅行节奏要宽松。"
+    ]
+    assert service.recall(bob_id, "规划一趟历史建筑旅行") == []
+    assert service.delete(alice_id, memory.id)
+    assert service.recall(alice_id, "历史建筑") == []

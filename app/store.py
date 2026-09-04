@@ -43,6 +43,7 @@ class WorkerLeaseLost(RuntimeError):
 @dataclass(frozen=True)
 class RunExecutionInput:
     prompt: str
+    user_id: uuid.UUID
     session_id: uuid.UUID
     message_id: uuid.UUID
     trace_context: dict[str, Any] | None
@@ -488,8 +489,12 @@ def get_run_execution_input(
         message = session.get(Message, run.user_message_id)
         if message is None:
             return None
+        conversation = session.get(AgentSession, run.session_id)
+        if conversation is None:
+            return None
         return RunExecutionInput(
             prompt=message.content,
+            user_id=conversation.user_id,
             session_id=run.session_id,
             message_id=message.id,
             trace_context=decode_json(run.trace_context_json),

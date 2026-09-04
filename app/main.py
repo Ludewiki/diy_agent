@@ -17,6 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -28,6 +29,11 @@ from .auth import AuthService, tokens_match
 from .config import Settings
 from .database import Database
 from .errors import ApiError
+from .memory import (
+    DirectLangGraphStoreBackend,
+    LangGraphPostgresStoreBackend,
+    MemoryService,
+)
 from .models import (
     AgentRun,
     AgentSession,
@@ -35,6 +41,7 @@ from .models import (
     RunStatus,
     SessionStatus,
     TERMINAL_RUN_STATUSES,
+    TravelMemory,
     User,
     utc_now,
 )
@@ -44,6 +51,10 @@ from .schemas import (
     InvokeRequest,
     InvokeResponse,
     LoginCredentials,
+    MemoryCreate,
+    MemoryListResponse,
+    MemoryResponse,
+    MemoryUpdate,
     MessageCreate,
     MessageResponse,
     QueuedRunResponse,
@@ -129,6 +140,7 @@ def create_app(
     database: Database | None = None,
     settings: Settings | None = None,
     sync_runner: SyncRunner = run_prompt,
+    memory_service: MemoryService | None = None,
 ) -> FastAPI:
     runtime_settings = settings or Settings.from_env()
     runtime_settings.validate()
@@ -136,6 +148,16 @@ def create_app(
     if database is None:
         runtime_database.require_postgresql()
     auth_service = AuthService(runtime_database, runtime_settings)
+    runtime_memory_service = memory_service or MemoryService(
+        runtime_database,
+        (
+            LangGraphPostgresStoreBackend(runtime_settings.database_url)
+            if runtime_database.is_postgresql
+            else DirectLangGraphStoreBackend(InMemoryStore())
+        ),
+        recall_limit=runtime_settings.memory_recall_limit,
+        auto_extract=runtime_settings.memory_auto_extract,
+    )
     telemetry_runtime.configure(
         runtime_settings,
         service_role="api",
@@ -358,6 +380,86 @@ def create_app(
     )
     def me(user: User = Depends(current_user)) -> User:
         return user
+
+    @application.get(
+        "/v1/memories",
+        response_model=MemoryListResponse,
+        tags=["memory"],
+    )
+    def list_memories(
+        include_candidates: bool = Query(default=True),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=1, le=100),
+        user: User = Depends(current_user),
+    ) -> MemoryListResponse:
+        memories = runtime_memory_service.list_for_user(
+            user.id,
+            include_candidates=include_candidates,
+            page=page,
+            page_size=page_size,
+        )
+        candidates, confirmed = runtime_memory_service.counts_for_user(user.id)
+        total = candidates + confirmed if include_candidates else confirmed
+        return MemoryListResponse(
+            items=[MemoryResponse.model_validate(item) for item in memories],
+            total=total,
+            candidate_count=candidates,
+            confirmed_count=confirmed,
+            page=page,
+            page_size=page_size,
+        )
+
+    @application.post(
+        "/v1/memories",
+        response_model=MemoryResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["memory"],
+    )
+    def create_memory(
+        payload: MemoryCreate,
+        user: User = Depends(current_user),
+        _csrf: None = Depends(require_csrf),
+    ) -> TravelMemory:
+        return runtime_memory_service.create_manual(
+            user.id,
+            payload.content,
+            payload.memory_type,
+        )
+
+    @application.patch(
+        "/v1/memories/{memory_id}",
+        response_model=MemoryResponse,
+        tags=["memory"],
+    )
+    def update_memory(
+        memory_id: uuid.UUID,
+        payload: MemoryUpdate,
+        user: User = Depends(current_user),
+        _csrf: None = Depends(require_csrf),
+    ) -> TravelMemory:
+        memory = runtime_memory_service.update(
+            user.id,
+            memory_id,
+            content=payload.content,
+            status=payload.status,
+        )
+        if memory is None:
+            raise ApiError(404, "MEMORY_NOT_FOUND", "长期记忆不存在。")
+        return memory
+
+    @application.delete(
+        "/v1/memories/{memory_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["memory"],
+    )
+    def delete_memory(
+        memory_id: uuid.UUID,
+        user: User = Depends(current_user),
+        _csrf: None = Depends(require_csrf),
+    ) -> Response:
+        if not runtime_memory_service.delete(user.id, memory_id):
+            raise ApiError(404, "MEMORY_NOT_FOUND", "长期记忆不存在。")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @application.post(
         "/v1/auth/logout",

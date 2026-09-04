@@ -57,6 +57,7 @@ jobs:
       - name: Validate migrations
         run: |
           uv run alembic upgrade head
+          uv run python -m app.memory_setup
           uv run alembic check
 
       - name: Run unit tests

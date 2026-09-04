@@ -52,6 +52,8 @@ class Instruments:
     active_workers: Any
     context_input_tokens: Any
     context_history_messages: Any
+    context_memory_tokens: Any
+    context_memories_recalled: Any
     context_messages_summarized: Any
     context_messages_truncated: Any
     context_summaries: Any
@@ -156,6 +158,14 @@ class TelemetryRuntime:
                 ),
             )
         )
+        views.append(
+            View(
+                instrument_name="agent.context.memory.tokens",
+                aggregation=ExplicitBucketHistogramAggregation(
+                    (0, 32, 64, 128, 256, 512, 800, 1200)
+                ),
+            )
+        )
         views.extend(
             [
                 View(
@@ -166,6 +176,7 @@ class TelemetryRuntime:
                 )
                 for name in (
                     "agent.context.history.messages",
+                    "agent.context.memories.recalled",
                     "agent.run.llm.invocations",
                     "agent.run.tool.invocations",
                 )
@@ -261,6 +272,16 @@ class TelemetryRuntime:
                 "agent.context.history.messages",
                 unit="{message}",
                 description="Full recent messages retained in a Run context.",
+            ),
+            context_memory_tokens=meter.create_histogram(
+                "agent.context.memory.tokens",
+                unit="{token}",
+                description="Confirmed long-term memory tokens added to a Run context.",
+            ),
+            context_memories_recalled=meter.create_histogram(
+                "agent.context.memories.recalled",
+                unit="{memory}",
+                description="Confirmed long-term memories recalled for a Run.",
             ),
             context_messages_summarized=meter.create_counter(
                 "agent.context.messages.summarized",
@@ -440,6 +461,8 @@ def record_context_prepared(
     *,
     estimated_input_tokens: int,
     history_messages: int,
+    long_term_memory_tokens: int,
+    long_term_memories_recalled: int,
     messages_summarized: int,
     messages_truncated: int,
     summary_updated: bool,
@@ -457,6 +480,14 @@ def record_context_prepared(
     )
     runtime.instruments.context_history_messages.record(
         history_messages,
+        attributes,
+    )
+    runtime.instruments.context_memory_tokens.record(
+        long_term_memory_tokens,
+        attributes,
+    )
+    runtime.instruments.context_memories_recalled.record(
+        long_term_memories_recalled,
         attributes,
     )
     if messages_summarized > 0:

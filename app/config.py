@@ -47,6 +47,10 @@ class Settings:
     context_output_reserved_tokens: int = 1800
     context_recent_message_limit: int = 8
     context_summary_max_tokens: int = 1200
+    memory_enabled: bool = True
+    memory_recall_limit: int = 8
+    memory_context_max_tokens: int = 800
+    memory_auto_extract: bool = True
     agent_max_llm_calls: int = 6
     agent_max_tool_calls: int = 4
     auth_cookie_name: str = "diy_agent_session"
@@ -96,6 +100,14 @@ class Settings:
             raise ValueError("系统提示与 Tool 预留之和必须小于输入上下文预算")
         if self.context_recent_message_limit < 1:
             raise ValueError("CONTEXT_RECENT_MESSAGE_LIMIT 必须至少为 1")
+        if self.memory_recall_limit < 1 or self.memory_recall_limit > 50:
+            raise ValueError("MEMORY_RECALL_LIMIT 必须介于 1 和 50 之间")
+        if self.memory_context_max_tokens < 0:
+            raise ValueError("MEMORY_CONTEXT_MAX_TOKENS 不能小于 0")
+        if self.memory_context_max_tokens >= self.context_max_input_tokens:
+            raise ValueError(
+                "MEMORY_CONTEXT_MAX_TOKENS 必须小于 CONTEXT_MAX_INPUT_TOKENS"
+            )
         if self.agent_max_llm_calls < 1 or self.agent_max_tool_calls < 1:
             raise ValueError("Agent 的 LLM 与 Tool 调用上限必须至少为 1")
         if self.auth_session_lifetime_days < 1:
@@ -172,6 +184,12 @@ class Settings:
             context_summary_max_tokens=int(
                 os.getenv("CONTEXT_SUMMARY_MAX_TOKENS", "1200")
             ),
+            memory_enabled=_environment_bool("MEMORY_ENABLED", True),
+            memory_recall_limit=int(os.getenv("MEMORY_RECALL_LIMIT", "8")),
+            memory_context_max_tokens=int(
+                os.getenv("MEMORY_CONTEXT_MAX_TOKENS", "800")
+            ),
+            memory_auto_extract=_environment_bool("MEMORY_AUTO_EXTRACT", True),
             agent_max_llm_calls=int(os.getenv("AGENT_MAX_LLM_CALLS", "6")),
             agent_max_tool_calls=int(os.getenv("AGENT_MAX_TOOL_CALLS", "4")),
             auth_cookie_name=os.getenv("AUTH_COOKIE_NAME", "diy_agent_session"),

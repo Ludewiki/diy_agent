@@ -49,6 +49,7 @@
     initialSessionRestored: false,
     runActive: false,
     sessionItems: [],
+    memoryItems: [],
   };
 
   function parseDate(value) {
@@ -127,6 +128,7 @@
     $("#context-tokens").textContent = "0 / 12,000 tokens";
     $("#context-history").textContent = "历史 0 条";
     $("#context-summary").textContent = "摘要未使用";
+    $("#context-memory").textContent = "长期记忆 0 条";
   }
 
   function showError(message) {
@@ -442,6 +444,8 @@
       $("#context-summary").textContent = data.summary_present
         ? (data.summary_updated ? "摘要已更新" : "摘要已复用")
         : "摘要未使用";
+      $("#context-memory").textContent =
+        "长期记忆 " + Number(data.long_term_memories_recalled || 0) + " 条";
       if (data.over_budget) {
         addWarning("当前问题与最近上下文超过估算预算；Agent 已优先保留当前问题和最近一轮。");
       }
@@ -871,6 +875,8 @@
     $("#context-summary").textContent = usage.summary_present
       ? (usage.summary_updated ? "摘要已更新" : "摘要已复用")
       : "摘要未使用";
+    $("#context-memory").textContent =
+      "长期记忆 " + Number(usage.long_term_memories_recalled || 0) + " 条";
   }
 
   function renderRunOutput(output) {
@@ -931,10 +937,12 @@
       label.textContent = state.user.email;
       $("#auth-close").classList.remove("is-hidden");
       $("#history-button").classList.remove("is-hidden");
+      $("#memory-button").classList.remove("is-hidden");
     } else {
       label.textContent = "登录";
       $("#auth-close").classList.add("is-hidden");
       $("#history-button").classList.add("is-hidden");
+      $("#memory-button").classList.add("is-hidden");
     }
     updateComposerState();
   }
@@ -1016,8 +1024,10 @@
       state.runActive = false;
       state.initialSessionRestored = false;
       state.sessionItems = [];
+      state.memoryItems = [];
       renderWorkspaceSessions([]);
       renderConversation([]);
+      closeMemoryDialog();
       $("#workspace").classList.add("is-idle");
       renderAuthState();
       try {
@@ -1054,6 +1064,149 @@
     const dialog = $("#history-dialog");
     if (typeof dialog.close === "function") dialog.close();
     else dialog.removeAttribute("open");
+  }
+
+  function openMemoryDialog() {
+    const dialog = $("#memory-dialog");
+    if (dialog.open) return;
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+  }
+
+  function closeMemoryDialog() {
+    const dialog = $("#memory-dialog");
+    if (typeof dialog.close === "function") dialog.close();
+    else dialog.removeAttribute("open");
+  }
+
+  function memoryTypeLabel(type) {
+    const labels = {
+      profile: "用户画像",
+      preference: "旅行偏好",
+      episodic: "历史决策",
+      rejected: "拒绝项",
+    };
+    return labels[type] || type;
+  }
+
+  function renderMemories(items) {
+    const container = $("#memory-list");
+    container.replaceChildren();
+    if (!items.length) {
+      container.append(
+        create(
+          "div",
+          "empty-copy",
+          "还没有长期记忆。你可以手动添加，或在对话中明确说“请记住……”。"
+        )
+      );
+      return;
+    }
+    items.forEach((item) => {
+      const candidate = item.status === "CANDIDATE";
+      const card = create("article", "memory-item" + (candidate ? " is-candidate" : ""));
+      const top = create("div", "memory-item-top");
+      top.append(
+        create("span", "memory-item-type", memoryTypeLabel(item.memory_type)),
+        create(
+          "span",
+          "memory-status" + (candidate ? "" : " is-confirmed"),
+          candidate ? "待确认" : "已确认 · 跨会话生效"
+        )
+      );
+      const meta = create("div", "memory-item-meta");
+      meta.append(
+        create("span", "", "可信度 " + Math.round(Number(item.confidence || 0) * 100) + "%"),
+        create("span", "", "更新于 " + formatSessionTime(item.updated_at))
+      );
+      const actions = create("div", "memory-actions");
+      if (candidate) {
+        const confirm = create("button", "", "确认并启用");
+        confirm.type = "button";
+        confirm.addEventListener("click", () => updateMemory(item, { status: "CONFIRMED" }));
+        actions.append(confirm);
+      }
+      const edit = create("button", "", "修改");
+      edit.type = "button";
+      edit.addEventListener("click", () => editMemory(item));
+      const remove = create("button", "", "删除");
+      remove.type = "button";
+      remove.addEventListener("click", () => deleteMemory(item));
+      actions.append(edit, remove);
+      card.append(top, create("p", "", item.content), meta, actions);
+      container.append(card);
+    });
+  }
+
+  async function loadMemories() {
+    if (!state.user) return;
+    const includeCandidates = $("#memory-candidates").checked;
+    try {
+      const result = await requestJson(
+        "/v1/memories?page=1&page_size=100&include_candidates=" + includeCandidates,
+        { method: "GET" }
+      );
+      const data = result.body;
+      state.memoryItems = data.items || [];
+      renderMemories(state.memoryItems);
+      $("#memory-summary").textContent =
+        "已确认 " + Number(data.confirmed_count || 0) +
+        " 条 · 待确认 " + Number(data.candidate_count || 0) +
+        " 条。只有已确认记忆会跨会话参与规划。";
+    } catch (error) {
+      $("#memory-summary").textContent = "长期记忆读取失败：" + error.message;
+      renderMemories([]);
+    }
+  }
+
+  async function updateMemory(item, changes) {
+    try {
+      await requestJson("/v1/memories/" + item.id, {
+        method: "PATCH",
+        body: JSON.stringify(changes),
+      });
+      await loadMemories();
+    } catch (error) {
+      $("#memory-summary").textContent = "长期记忆更新失败：" + error.message;
+    }
+  }
+
+  async function editMemory(item) {
+    const content = window.prompt("修改这条长期记忆", item.content || "");
+    if (!content || !content.trim() || content.trim() === item.content) return;
+    await updateMemory(item, { content: content.trim() });
+  }
+
+  async function deleteMemory(item) {
+    if (!window.confirm("删除这条长期记忆？删除后 Agent 不会再自动恢复它。")) return;
+    try {
+      await requestJson("/v1/memories/" + item.id, { method: "DELETE" });
+      await loadMemories();
+    } catch (error) {
+      $("#memory-summary").textContent = "长期记忆删除失败：" + error.message;
+    }
+  }
+
+  async function submitMemory(event) {
+    event.preventDefault();
+    const submit = $("#memory-submit");
+    submit.disabled = true;
+    try {
+      const formData = new FormData(event.currentTarget);
+      await requestJson("/v1/memories", {
+        method: "POST",
+        body: JSON.stringify({
+          content: String(formData.get("content") || "").trim(),
+          memory_type: String(formData.get("memory_type") || "preference"),
+        }),
+      });
+      event.currentTarget.reset();
+      await loadMemories();
+    } catch (error) {
+      $("#memory-summary").textContent = "长期记忆添加失败：" + error.message;
+    } finally {
+      submit.disabled = false;
+    }
   }
 
   function formatSessionTime(value) {
@@ -1322,6 +1475,14 @@
     await loadSessionHistory();
     openHistoryDialog();
   });
+  $("#memory-button").addEventListener("click", async () => {
+    await loadMemories();
+    openMemoryDialog();
+  });
+  $("#memory-close").addEventListener("click", closeMemoryDialog);
+  $("#memory-dialog").addEventListener("cancel", closeMemoryDialog);
+  $("#memory-candidates").addEventListener("change", loadMemories);
+  $("#memory-form").addEventListener("submit", submitMemory);
   $("#history-close").addEventListener("click", closeHistoryDialog);
   $("#history-archived").addEventListener("change", () => {
     state.historyPage = 1;

@@ -77,8 +77,10 @@ def test_product_page_and_assets_are_served(client: TestClient) -> None:
     assert 'id="planner-form"' in page.text
     assert 'id="weather-candidates"' in page.text
     assert 'id="map"' in page.text
-    assert "/static/app.js?v=20260903-run-result-v1" in page.text
+    assert "/static/app.js?v=20260904-long-term-memory" in page.text
     assert 'id="history-dialog"' in page.text
+    assert 'id="memory-dialog"' in page.text
+    assert 'id="memory-button"' in page.text
     assert 'id="workspace-session-list"' in page.text
     assert 'id="conversation-list"' in page.text
     assert 'id="follow-up-form"' in page.text
@@ -92,12 +94,15 @@ def test_product_page_and_assets_are_served(client: TestClient) -> None:
     assert "renderMapDay" in script.text
     assert "submitFollowUp" in script.text
     assert '"/messages"' in script.text
+    assert '"/v1/memories"' in script.text
+    assert "long_term_memories_recalled" in script.text
     styles = client.get("/static/styles.css")
     assert styles.status_code == 200
     assert styles.headers["cache-control"] == "no-cache"
     assert ".planner-card" in styles.text
     assert ".workbench-grid" in styles.text
     assert ".message-bubble" in styles.text
+    assert ".memory-card" in styles.text
 
 
 def test_session_message_and_pending_run(client: TestClient) -> None:

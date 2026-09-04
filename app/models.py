@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any
 import uuid
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -41,6 +41,19 @@ class RunStatus(StrEnum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+class MemoryStatus(StrEnum):
+    CANDIDATE = "CANDIDATE"
+    CONFIRMED = "CONFIRMED"
+    DELETED = "DELETED"
+
+
+class MemoryType(StrEnum):
+    PROFILE = "profile"
+    PREFERENCE = "preference"
+    EPISODIC = "episodic"
+    REJECTED = "rejected"
 
 
 TERMINAL_RUN_STATUSES = {
@@ -177,6 +190,55 @@ class AgentRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class TravelMemory(Base):
+    __tablename__ = "travel_memories"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "normalized_key",
+            name="uq_travel_memories_user_key",
+        ),
+        Index(
+            "ix_travel_memories_user_status_updated",
+            "user_id",
+            "status",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=new_id
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    memory_type: Mapped[str] = mapped_column(String(32), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    normalized_key: Mapped[str] = mapped_column(String(255))
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    status: Mapped[str] = mapped_column(
+        String(32), default=MemoryStatus.CANDIDATE.value, index=True
+    )
+    source_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
+    source_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON_PAYLOAD, default=dict
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
 
 
 class RunEvent(Base):

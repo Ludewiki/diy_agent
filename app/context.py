@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, Sequence
 import uuid
 
 from sqlalchemy import select
@@ -26,6 +26,7 @@ class ContextPolicy:
     output_reserved_tokens: int = 1800
     recent_message_limit: int = 8
     summary_max_tokens: int = 1200
+    long_term_memory_max_tokens: int = 800
     minimum_recent_tokens: int = 128
 
     @classmethod
@@ -37,6 +38,7 @@ class ContextPolicy:
             output_reserved_tokens=settings.context_output_reserved_tokens,
             recent_message_limit=settings.context_recent_message_limit,
             summary_max_tokens=settings.context_summary_max_tokens,
+            long_term_memory_max_tokens=settings.memory_context_max_tokens,
         )
 
 
@@ -53,10 +55,12 @@ class ContextUsage:
     current_message_tokens: int
     history_tokens: int
     summary_tokens: int
+    long_term_memory_tokens: int
     system_reserved_tokens: int
     tool_reserved_tokens: int
     output_reserved_tokens: int
     history_messages_used: int
+    long_term_memories_recalled: int
     messages_summarized: int
     messages_truncated: int
     summary_present: bool
@@ -70,10 +74,12 @@ class ContextUsage:
             "current_message_tokens": self.current_message_tokens,
             "history_tokens": self.history_tokens,
             "summary_tokens": self.summary_tokens,
+            "long_term_memory_tokens": self.long_term_memory_tokens,
             "system_reserved_tokens": self.system_reserved_tokens,
             "tool_reserved_tokens": self.tool_reserved_tokens,
             "output_reserved_tokens": self.output_reserved_tokens,
             "history_messages_used": self.history_messages_used,
+            "long_term_memories_recalled": self.long_term_memories_recalled,
             "messages_summarized": self.messages_summarized,
             "messages_truncated": self.messages_truncated,
             "summary_present": self.summary_present,
@@ -86,6 +92,7 @@ class ContextUsage:
 class PreparedContext:
     history: tuple[ContextMessage, ...]
     summary: str | None
+    long_term_memory: str | None
     usage: ContextUsage
 
 
@@ -200,6 +207,7 @@ def prepare_session_context(
     policy: ContextPolicy,
     counter: TokenCounter | None = None,
     summarizer: Summarizer | None = None,
+    long_term_memories: Sequence[str] = (),
 ) -> PreparedContext:
     """Build bounded history and atomically advance the session summary cursor."""
     token_counter = counter or TokenCounter()
@@ -235,11 +243,22 @@ def prepare_session_context(
             )
         unsummarized = previous_messages[summarized_index + 1 :]
         current_tokens = token_counter.count(current_prompt)
+        memory_lines = [
+            f"- {' '.join(str(memory).split())}"
+            for memory in long_term_memories
+            if str(memory).strip()
+        ]
+        long_term_memory = token_counter.truncate(
+            chr(10).join(memory_lines),
+            policy.long_term_memory_max_tokens,
+        )
+        long_term_memory_tokens = token_counter.count(long_term_memory)
         raw_history_budget = (
             policy.max_input_tokens
             - policy.system_reserved_tokens
             - policy.tool_reserved_tokens
             - current_tokens
+            - long_term_memory_tokens
         )
         history_budget = max(policy.minimum_recent_tokens, raw_history_budget)
 
@@ -315,6 +334,7 @@ def prepare_session_context(
             + current_tokens
             + summary_tokens
             + history_tokens
+            + long_term_memory_tokens
         )
         usage = ContextUsage(
             max_input_tokens=policy.max_input_tokens,
@@ -322,14 +342,21 @@ def prepare_session_context(
             current_message_tokens=current_tokens,
             history_tokens=history_tokens,
             summary_tokens=summary_tokens,
+            long_term_memory_tokens=long_term_memory_tokens,
             system_reserved_tokens=policy.system_reserved_tokens,
             tool_reserved_tokens=policy.tool_reserved_tokens,
             output_reserved_tokens=policy.output_reserved_tokens,
             history_messages_used=len(history),
+            long_term_memories_recalled=len(memory_lines),
             messages_summarized=len(dropped),
             messages_truncated=messages_truncated,
             summary_present=bool(summary),
             summary_updated=summary_updated,
             over_budget=estimated_input > policy.max_input_tokens,
         )
-        return PreparedContext(history=tuple(history), summary=summary, usage=usage)
+        return PreparedContext(
+            history=tuple(history),
+            summary=summary,
+            long_term_memory=long_term_memory or None,
+            usage=usage,
+        )

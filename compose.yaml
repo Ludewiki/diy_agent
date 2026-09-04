@@ -18,6 +18,10 @@ x-runtime-environment: &runtime-environment
   CONTEXT_OUTPUT_RESERVED_TOKENS: ${CONTEXT_OUTPUT_RESERVED_TOKENS:-1800}
   CONTEXT_RECENT_MESSAGE_LIMIT: ${CONTEXT_RECENT_MESSAGE_LIMIT:-8}
   CONTEXT_SUMMARY_MAX_TOKENS: ${CONTEXT_SUMMARY_MAX_TOKENS:-1200}
+  MEMORY_ENABLED: ${MEMORY_ENABLED:-true}
+  MEMORY_RECALL_LIMIT: ${MEMORY_RECALL_LIMIT:-8}
+  MEMORY_CONTEXT_MAX_TOKENS: ${MEMORY_CONTEXT_MAX_TOKENS:-800}
+  MEMORY_AUTO_EXTRACT: ${MEMORY_AUTO_EXTRACT:-true}
   AGENT_MAX_LLM_CALLS: ${AGENT_MAX_LLM_CALLS:-6}
   AGENT_MAX_TOOL_CALLS: ${AGENT_MAX_TOOL_CALLS:-4}
   SSE_POLL_SECONDS: ${SSE_POLL_SECONDS:-0.5}
@@ -107,11 +111,19 @@ services:
         condition: service_healthy
     restart: "no"
 
+  memory-setup:
+    <<: *app-service
+    command: ["python", "-m", "app.memory_setup"]
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    restart: "no"
+
   demo-seed:
     <<: *app-service
     command: ["python", "-m", "app.demo_seed"]
     depends_on:
-      migration:
+      memory-setup:
         condition: service_completed_successfully
     restart: "no"
 
@@ -120,6 +132,8 @@ services:
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
       migration:
+        condition: service_completed_successfully
+      memory-setup:
         condition: service_completed_successfully
       demo-seed:
         condition: service_completed_successfully
@@ -144,6 +158,8 @@ services:
     command: ["python", "-m", "app.worker"]
     depends_on:
       migration:
+        condition: service_completed_successfully
+      memory-setup:
         condition: service_completed_successfully
       demo-seed:
         condition: service_completed_successfully

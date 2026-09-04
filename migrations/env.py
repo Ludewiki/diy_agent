@@ -27,6 +27,18 @@ if make_url(database_url).get_backend_name() != "postgresql":
     )
 config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 target_metadata = Base.metadata
+LANGGRAPH_MANAGED_TABLES = {"store", "store_migrations"}
+
+
+def include_name(
+    name: str | None,
+    type_: str,
+    parent_names: dict[str, str | None],
+) -> bool:
+    """Keep Alembic from treating LangGraph-owned Store tables as drift."""
+    if type_ == "table" and name in LANGGRAPH_MANAGED_TABLES:
+        return False
+    return True
 
 
 def run_migrations_offline() -> None:
@@ -36,6 +48,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_name=include_name,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -52,6 +65,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            include_name=include_name,
         )
         with context.begin_transaction():
             context.run_migrations()

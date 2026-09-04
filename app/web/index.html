@@ -13,14 +13,14 @@
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
       crossorigin=""
     >
-    <link rel="stylesheet" href="/static/styles.css?v=20260903-run-result-v1">
+    <link rel="stylesheet" href="/static/styles.css?v=20260904-long-term-memory">
     <script
       src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
       integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
       crossorigin=""
       defer
     ></script>
-    <script src="/static/app.js?v=20260903-run-result-v1" defer></script>
+    <script src="/static/app.js?v=20260904-long-term-memory" defer></script>
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
@@ -37,6 +37,7 @@
         <span>Weather-aware agent</span>
         <a href="/docs" target="_blank" rel="noreferrer">API</a>
         <button id="history-button" class="account-button is-hidden" type="button">历史会话</button>
+        <button id="memory-button" class="account-button is-hidden" type="button">长期记忆</button>
         <button id="account-button" class="account-button" type="button">
           <span id="account-label">登录</span>
         </button>
@@ -92,6 +93,59 @@
           <span id="history-page">第 1 页</span>
           <button id="history-next" type="button">下一页</button>
         </nav>
+      </section>
+    </dialog>
+
+    <dialog id="memory-dialog" class="memory-dialog" aria-labelledby="memory-title">
+      <section class="memory-card">
+        <div class="memory-heading">
+          <div>
+            <p class="step-label">WHAT ATLAS REMEMBERS</p>
+            <h2 id="memory-title">长期记忆</h2>
+            <p id="memory-summary">仅“已确认”的记忆会跨会话参与规划。</p>
+          </div>
+          <button id="memory-close" class="dialog-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <div class="memory-privacy-note">
+          <strong>由你控制</strong>
+          <span>系统会把表单偏好保存为待确认候选；你明确说“请记住”时可直接确认。你可以随时修改或删除。</span>
+        </div>
+        <form id="memory-form" class="memory-form">
+          <label class="field">
+            <span>手动添加一条已确认记忆</span>
+            <textarea
+              id="memory-content"
+              name="content"
+              rows="2"
+              maxlength="2000"
+              placeholder="例如：我喜欢历史建筑，旅行节奏要宽松。"
+              required
+            ></textarea>
+          </label>
+          <div class="memory-form-actions">
+            <label class="field">
+              <span>类型</span>
+              <select id="memory-type" name="memory_type">
+                <option value="preference">旅行偏好</option>
+                <option value="profile">用户画像</option>
+                <option value="episodic">历史决策</option>
+                <option value="rejected">拒绝项</option>
+              </select>
+            </label>
+            <button id="memory-submit" class="primary-button" type="submit">
+              <span>添加记忆</span>
+              <span class="button-arrow" aria-hidden="true">→</span>
+            </button>
+          </div>
+        </form>
+        <div class="memory-list-heading">
+          <h3>记忆清单</h3>
+          <label>
+            <input id="memory-candidates" type="checkbox" checked>
+            <span>显示待确认</span>
+          </label>
+        </div>
+        <div id="memory-list" class="memory-list"></div>
       </section>
     </dialog>
 
@@ -287,6 +341,7 @@
                 <div class="context-budget-meta">
                   <span id="context-history">历史 0 条</span>
                   <span id="context-summary">摘要未使用</span>
+                  <span id="context-memory">长期记忆 0 条</span>
                 </div>
               </div>
               <div class="trace-box">

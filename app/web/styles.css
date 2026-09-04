@@ -329,6 +329,197 @@ footer {
   font-size: 11px;
 }
 
+.memory-dialog {
+  width: min(720px, calc(100% - 30px));
+  max-height: min(860px, calc(100vh - 30px));
+  padding: 0;
+  color: var(--ink);
+  border: 0;
+  border-radius: 28px;
+  background: transparent;
+  box-shadow: var(--shadow);
+}
+
+.memory-dialog::backdrop {
+  background: rgba(11, 28, 23, 0.52);
+  backdrop-filter: blur(9px);
+}
+
+.memory-card {
+  max-height: min(860px, calc(100vh - 30px));
+  padding: 34px;
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 28px;
+  background:
+    radial-gradient(circle at 92% 2%, rgba(201, 223, 213, 0.5), transparent 17rem),
+    #f7f5ef;
+}
+
+.memory-heading,
+.memory-list-heading,
+.memory-form-actions,
+.memory-item-top,
+.memory-item-meta,
+.memory-actions {
+  display: flex;
+  align-items: center;
+}
+
+.memory-heading {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.memory-heading h2 {
+  margin: 8px 0 4px;
+  font: 400 38px/1.1 Georgia, "Songti SC", serif;
+}
+
+.memory-heading p:not(.step-label) {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.memory-privacy-note {
+  display: grid;
+  gap: 5px;
+  margin: 24px 0 18px;
+  padding: 15px 17px;
+  color: #587067;
+  border: 1px solid rgba(22, 79, 66, 0.13);
+  border-radius: 16px;
+  background: rgba(201, 223, 213, 0.26);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.memory-privacy-note strong {
+  color: var(--forest);
+  letter-spacing: 0.08em;
+}
+
+.memory-form {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.52);
+}
+
+.memory-form textarea {
+  resize: vertical;
+}
+
+.memory-form-actions {
+  gap: 14px;
+  align-items: flex-end;
+}
+
+.memory-form-actions .field {
+  flex: 1;
+}
+
+.memory-form-actions .primary-button {
+  width: auto;
+  min-width: 150px;
+  margin-bottom: 16px;
+}
+
+.memory-list-heading {
+  justify-content: space-between;
+  margin: 26px 0 12px;
+}
+
+.memory-list-heading h3 {
+  margin: 0;
+  font: 400 22px/1.2 Georgia, "Songti SC", serif;
+}
+
+.memory-list-heading label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.memory-list {
+  display: grid;
+  gap: 11px;
+}
+
+.memory-item {
+  padding: 17px;
+  border: 1px solid var(--line);
+  border-radius: 17px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.memory-item.is-candidate {
+  border-style: dashed;
+  background: rgba(244, 238, 220, 0.68);
+}
+
+.memory-item-top {
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.memory-item-type,
+.memory-status {
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
+.memory-item-type {
+  color: var(--forest);
+  background: var(--mint);
+}
+
+.memory-status {
+  color: #8b681e;
+  background: #f3e7c6;
+}
+
+.memory-status.is-confirmed {
+  color: var(--forest);
+  background: rgba(201, 223, 213, 0.55);
+}
+
+.memory-item p {
+  margin: 12px 0;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.memory-item-meta {
+  gap: 12px;
+  color: #7c8781;
+  font-size: 9px;
+}
+
+.memory-actions {
+  gap: 7px;
+  margin-top: 13px;
+}
+
+.memory-actions button {
+  padding: 7px 11px;
+  color: var(--forest);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.memory-actions button:last-child {
+  color: var(--danger);
+}
+
 .history-pagination button:disabled {
   cursor: not-allowed;
   opacity: 0.35;
@@ -1875,6 +2066,16 @@ footer {
     display: none;
   }
 
+  .header-meta {
+    gap: 6px;
+  }
+
+  .account-button {
+    min-width: auto;
+    max-width: 112px;
+    padding-inline: 10px;
+  }
+
   .hero {
     grid-template-columns: 1fr;
     min-height: 0;
@@ -1984,6 +2185,21 @@ footer {
     flex-direction: column;
     justify-content: center;
     align-items: flex-start;
+  }
+
+  .memory-card {
+    padding: 24px 20px;
+  }
+
+  .memory-form-actions {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .memory-form-actions .primary-button {
+    width: 100%;
+    margin-bottom: 0;
   }
 }
 
